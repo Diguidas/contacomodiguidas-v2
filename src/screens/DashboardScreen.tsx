@@ -705,7 +705,8 @@ function Filters({
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
         <span style={{ fontSize: 13, color: '#94A3B8' }}>ⓘ</span>
         <span style={{ fontSize: 12, color: '#64748B' }}>
-          Carregado: itens em aberto + a sprint pesquisada. Trocar filtros só aplica ao clicar em "Pesquisar".
+          Carregado: itens em aberto + as últimas sprints (trocar de sprint é instantâneo dentro desse período; fora
+          dele, busca de novo). Trocar filtros só aplica ao clicar em "Pesquisar".
         </span>
       </div>
     </div>

@@ -42,7 +42,21 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
   const [selectedSprint, setSelectedSprint] = useState<Sprint | null>(
     sprintService.sprintFor(sprintService.sprintNumberContaining(new Date())),
   );
+  // Dashboard fetches a rolling window of the last DASHBOARD_CACHE_SPRINTS
+  // sprints up front (open items + everything changed since then) and keeps
+  // it around — switching the sprint dropdown just re-filters this in
+  // memory (DashboardScreen already slices completed items by date range),
+  // so it's instant as long as the picked sprint falls inside that window.
+  // Only picking something older triggers a real (loading) fetch, which
+  // also widens the cached window to cover it from then on.
+  const [cachedFromSprintNumber, setCachedFromSprintNumber] = useState<number | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // The main content area is one scrollable div shared by every screen —
+  // React doesn't reset its scrollTop just because a different screen (or a
+  // different internal tab, e.g. Visão do time's Ranking/WIP/Sofrimento)
+  // got rendered into it, so without this a scrolled-down position leaks
+  // into whatever you open next.
+  const contentRef = useRef<HTMLDivElement>(null);
   const [isNarrow, setIsNarrow] = useState(
     typeof window !== 'undefined' ? window.innerWidth < 900 : false,
   );
@@ -65,31 +79,46 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
   }, []);
 
   useEffect(() => {
+    contentRef.current?.scrollTo(0, 0);
+  }, [destination]);
+
+  useEffect(() => {
     (async () => {
       const loaded = await configService.load();
       setSettings(loaded);
       setSettingsLoaded(true);
       if (loaded.isConfigured) {
         // kick off first refresh
-        refresh(loaded, selectedSprint);
+        refresh(loaded);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function refresh(useSettings?: AppSettings, useSprint?: Sprint | null) {
+  /** How many sprints back the Dashboard keeps warm without asking the API
+   * again — matches the size of the dropdown's usual browsing range. */
+  const DASHBOARD_CACHE_SPRINTS = 6;
+
+  /** Fetches open items + everything changed since `fromSprintNumber` (the
+   * last DASHBOARD_CACHE_SPRINTS by default, or further back when a caller
+   * needs to widen the cache to reach an older sprint). */
+  async function refresh(useSettings?: AppSettings, fromSprintNumber?: number) {
     const s = useSettings ?? settings;
-    const sprint = useSprint === undefined ? selectedSprint : useSprint;
     if (!s.isConfigured) return;
+    const currentSprintNumber = sprintService.sprintNumberContaining(new Date());
+    const targetFrom = Math.min(
+      fromSprintNumber ?? currentSprintNumber,
+      cachedFromSprintNumber ?? currentSprintNumber - (DASHBOARD_CACHE_SPRINTS - 1),
+    );
     setLoading(true);
     setError(null);
     try {
       const service = new AzureDevOpsService(s);
       const fetched = await service.fetchMyWorkItems({
-        changedSince: sprint?.start,
-        changedUntil: sprint?.end,
+        changedSince: sprintService.sprintFor(targetFrom).start,
       });
       setItems(fetched);
+      setCachedFromSprintNumber(targetFrom);
       setLastUpdated(new Date());
     } catch (e) {
       setError(String(e));
@@ -98,11 +127,15 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
     }
   }
 
-  /** The sprint dropdown changed — that decides what gets fetched now, so a
-   * new selection means a new (fast, scoped) fetch. */
+  /** The sprint dropdown changed. If it's still inside the cached window,
+   * just switch — DashboardScreen re-filters the already-loaded items
+   * locally, no loading spinner. Otherwise, widen the cache with a real
+   * (loading) fetch reaching back to that sprint. */
   function onSprintChanged(sprint: Sprint | null) {
     setSelectedSprint(sprint);
-    refresh(settings, sprint);
+    if (sprint != null && (cachedFromSprintNumber == null || sprint.number < cachedFromSprintNumber)) {
+      refresh(settings, sprint.number);
+    }
   }
 
   function historySprints(count: number): Sprint[] {
@@ -118,10 +151,23 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
     // Already loaded for this exact range and not a forced refresh — the
     // whole point of caching it here, so re-entering the tab is instant.
     if (!force && historyItems != null && count === undefined) return;
+
+    const wantedCount = count ?? historySprintCount;
+    const currentSprintNumber = sprintService.sprintNumberContaining(new Date());
+    const neededFromSprintNumber = currentSprintNumber - wantedCount + 1;
+    // The Dashboard already keeps open items + the last DASHBOARD_CACHE_SPRINTS
+    // sprints warm — if that already reaches back far enough for what
+    // Histórico wants, reuse it instead of firing a second, near-identical
+    // fetch the moment this tab is opened.
+    if (!force && cachedFromSprintNumber != null && cachedFromSprintNumber <= neededFromSprintNumber && items.length > 0) {
+      setHistoryItems(items);
+      return;
+    }
+
     setHistoryLoading(true);
     setHistoryError(null);
     try {
-      const earliestStart = historySprints(count ?? historySprintCount)[0].start;
+      const earliestStart = historySprints(wantedCount)[0].start;
       const service = new AzureDevOpsService(settings);
       const fetched = await service.fetchMyWorkItems({ changedSince: earliestStart });
       setHistoryItems(fetched);
@@ -141,7 +187,7 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
   async function saveSettings(next: AppSettings) {
     await configService.save(next);
     setSettings(next);
-    refresh(next, selectedSprint);
+    refresh(next);
   }
 
   /** Switches the visible tab and, if that tab needs its own data (only
@@ -243,7 +289,7 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
             </div>
           </div>
         )}
-        <div style={{ flex: 1, overflow: 'auto', minWidth: 0 }}>
+        <div ref={contentRef} style={{ flex: 1, overflow: 'auto', minWidth: 0 }}>
           {destination === 'dashboard' && (
             <DashboardScreen
               settings={settings}
@@ -278,6 +324,7 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
               selectedSprint={selectedSprint}
               sprints={sprints.current}
               onSprintChanged={onSprintChanged}
+              onTabChange={() => contentRef.current?.scrollTo(0, 0)}
             />
           )}
           {destination === 'history' && (

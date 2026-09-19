@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Cell, Pie, PieChart, ResponsiveContainer } from 'recharts';
 import { boardColumnMatches, WorkItem } from '../models/workItem';
@@ -221,6 +221,7 @@ export function TeamDashboardScreen({
   selectedSprint,
   sprints,
   onSprintChanged,
+  onTabChange,
 }: {
   settings: AppSettings;
   items: WorkItem[];
@@ -229,9 +230,24 @@ export function TeamDashboardScreen({
   selectedSprint: Sprint | null;
   sprints: Sprint[];
   onSprintChanged: (s: Sprint | null) => void;
+  // Lets the shell scroll its content area back to the top — this screen's
+  // own tabs (Ranking/WIP/Sofrimento) render into that same shared
+  // scrollable div, so switching between them needs the same reset a full
+  // screen change gets.
+  onTabChange?: () => void;
 }) {
   const preferredAreaOrder = ['Sustentação', 'Dados'];
   const [tab, setTab] = useState<0 | 1 | 2>(0);
+  // This screen scrolls internally (its own `overflow: auto` body below the
+  // fixed header/tab bar) rather than through the shell's shared content
+  // div, so resetting the shell's scroll on tab change doesn't reach it —
+  // it needs its own ref reset too.
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    bodyRef.current?.scrollTo(0, 0);
+    onTabChange?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
   const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set(defaultPerformanceGroupKeys));
   const [discountedRequestTypes, setDiscountedRequestTypes] = useState<Set<string>>(new Set());
   const [discountSuspicious, setDiscountSuspicious] = useState(false);
@@ -589,7 +605,7 @@ export function TeamDashboardScreen({
         </div>
       </div>
       <div style={{ height: 1, backgroundColor: BrandColors.border }} />
-      <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
+      <div ref={bodyRef} style={{ flex: 1, overflow: 'auto', padding: 16 }}>
         <div style={{ maxWidth: 1500, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 0 }}>
           {tab === 0 && (
             <>
