@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { Cell, Pie, PieChart, ResponsiveContainer } from 'recharts';
 import { boardColumnMatches, WorkItem } from '../models/workItem';
 import { ItemMetric, MetricsCalculator } from '../services/metricsService';
+import { CardRating } from '../services/cardRatingService';
 import { AppSettings } from '../services/settingsService';
 import { Sprint } from '../services/sprintService';
 import {
@@ -11,6 +12,7 @@ import {
   buildPerformanceRanking,
   defaultPerformanceGroupKeys,
   HealthScoreRanking,
+  isAttributedTo,
   performanceGroups,
   ResponsiblePerformance,
   sprintCutoff,
@@ -18,6 +20,7 @@ import {
 import { BrandColors } from '../theme';
 import { FilterBox, ToggleChip } from '../components/ToggleChip';
 import {
+  AlertTriangle,
   BarChart3,
   Calendar,
   Check,
@@ -29,6 +32,7 @@ import {
   Inbox,
   LayoutList,
   MousePointerClick,
+  Star,
   Trophy,
   Truck,
   UserRound,
@@ -222,6 +226,8 @@ export function TeamDashboardScreen({
   sprints,
   onSprintChanged,
   onTabChange,
+  ratings,
+  ratingsLoading,
 }: {
   settings: AppSettings;
   items: WorkItem[];
@@ -235,9 +241,11 @@ export function TeamDashboardScreen({
   // scrollable div, so switching between them needs the same reset a full
   // screen change gets.
   onTabChange?: () => void;
+  ratings: CardRating[];
+  ratingsLoading: boolean;
 }) {
   const preferredAreaOrder = ['Sustentação', 'Dados'];
-  const [tab, setTab] = useState<0 | 1 | 2>(0);
+  const [tab, setTab] = useState<0 | 1 | 2 | 3>(0);
   // This screen scrolls internally (its own `overflow: auto` body below the
   // fixed header/tab bar) rather than through the shell's shared content
   // div, so resetting the shell's scroll on tab change doesn't reach it —
@@ -251,6 +259,12 @@ export function TeamDashboardScreen({
   const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set(defaultPerformanceGroupKeys));
   const [discountedRequestTypes, setDiscountedRequestTypes] = useState<Set<string>>(new Set());
   const [discountSuspicious, setDiscountSuspicious] = useState(false);
+  // Own chip state for "Desvio de Cycle Time" — independent from the
+  // Ranking de performance chips above, so toggling one doesn't move the
+  // other.
+  const [cycleTimeGroups, setCycleTimeGroups] = useState<Set<string>>(new Set(defaultPerformanceGroupKeys));
+  const [cycleTimeDiscountedRequestTypes, setCycleTimeDiscountedRequestTypes] = useState<Set<string>>(new Set());
+  const [cycleTimeDiscountSuspicious, setCycleTimeDiscountSuspicious] = useState(false);
   const [breakdownDialog, setBreakdownDialog] = useState<{ label: string; metrics: ItemMetric[] } | null>(null);
   const [personDialog, setPersonDialog] = useState<{
     name: string;
@@ -344,6 +358,9 @@ export function TeamDashboardScreen({
 
   function isDiscounted(m: ItemMetric): boolean {
     return (discountSuspicious && m.isSuspicious) || discountedRequestTypes.has(m.item.requestType.trim());
+  }
+  function isDiscountedForCycleTime(m: ItemMetric): boolean {
+    return (cycleTimeDiscountSuspicious && m.isSuspicious) || cycleTimeDiscountedRequestTypes.has(m.item.requestType.trim());
   }
   function netClosed(p: ResponsiblePerformance): number {
     return p.items.filter((m) => m.done && !isDiscounted(m)).length;
@@ -605,7 +622,7 @@ export function TeamDashboardScreen({
         </div>
       </div>
       <div style={{ height: 1, backgroundColor: BrandColors.border }} />
-      <div ref={bodyRef} style={{ flex: 1, overflow: 'auto', padding: 16 }}>
+      <div ref={bodyRef} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 16 }}>
         <div style={{ maxWidth: 1500, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 0 }}>
           {tab === 0 && (
             <>
@@ -635,6 +652,44 @@ export function TeamDashboardScreen({
                   />
                 </div>
               </div>
+              <div style={{ height: 28 }} />
+              <SectionHeader
+                icon={<LayoutList size={17} strokeWidth={1.75} />}
+                iconColor={BrandColors.total}
+                title="Cruzamento complexidade x prioridade"
+                subtitle="Tempo médio do Backlog até Concluído (Triagem fora da conta) e quantidade de itens, só entre os concluídos — se uma complexidade maior não render em mais dias, ou uma prioridade maior não sai mais rápido, é sinal de que a etiquetagem não está refletindo a realidade."
+              />
+              <div style={{ height: 12 }} />
+              <ComplexityPriorityCrossTable
+                metrics={allMetrics.filter((m) => m.done)}
+                settings={settings}
+                onSelect={(label, metrics) => setBreakdownDialog({ label, metrics })}
+              />
+              <div style={{ height: 28 }} />
+              <SectionHeader
+                icon={<HeartPulse size={17} strokeWidth={1.75} />}
+                iconColor={BrandColors.warning}
+                title="Consistência de etiquetagem por responsável"
+                subtitle="Compara, por pessoa, o tempo médio dela numa etiqueta contra a média do time na mesma etiqueta — só entra na lista quem tem pelo menos 3 itens concluídos naquela etiqueta específica, pra não julgar ninguém em cima de 1 ou 2 cards."
+              />
+              <div style={{ height: 12 }} />
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: '#64748B', marginBottom: 6 }}>Por complexidade</div>
+              <LabelConsistencyTable
+                metrics={allMetrics.filter((m) => m.done)}
+                settings={settings}
+                dimension="complexity"
+                minSample={3}
+                onSelect={(label, metrics) => setBreakdownDialog({ label, metrics })}
+              />
+              <div style={{ height: 20 }} />
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: '#64748B', marginBottom: 6 }}>Por prioridade</div>
+              <LabelConsistencyTable
+                metrics={allMetrics.filter((m) => m.done)}
+                settings={settings}
+                dimension="priority"
+                minSample={3}
+                onSelect={(label, metrics) => setBreakdownDialog({ label, metrics })}
+              />
               <div style={{ height: 28 }} />
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'flex-start' }}>
                 <div style={{ flex: '1 1 380px' }}>
@@ -760,6 +815,65 @@ export function TeamDashboardScreen({
                 rows={performanceRanking}
                 netClosedOf={discountSuspicious || discountedRequestTypes.size > 0 ? netClosed : undefined}
                 onRowClick={setPerfDialog}
+              />
+              <div style={{ height: 28 }} />
+              <SectionHeader
+                icon={<Zap size={17} strokeWidth={1.75} />}
+                iconColor={BrandColors.developer}
+                title="Desvio de Cycle Time por responsável"
+                subtitle="Cycle Time (soma dos estágios marcados abaixo) de cada responsável contra a média do time, já descontando suspeitos/tipo de solicitação conforme os chips. Só entra na lista quem tem pelo menos 3 itens concluídos. As colunas Dados e Sustentação são a média de cada área, fixas (“—” quando ninguém do time tem item concluído lá), pra comparar qualquer um contra o benchmark do setor dele."
+              />
+              <div style={{ height: 12 }} />
+              <FilterBox message='Cada chip é uma coluna do board. Marcado = o tempo do card nessa coluna entra na soma do Cycle Time. Passe o mouse num chip pra ver o que ele representa.'>
+                {performanceGroups.map((g) => (
+                  <span key={g.key} title={g.description}>
+                    <ToggleChip
+                      label={g.label}
+                      selected={cycleTimeGroups.has(g.key)}
+                      onSelected={(selected) => {
+                        setCycleTimeGroups((prev) => {
+                          const next = new Set(prev);
+                          if (selected) next.add(g.key);
+                          else next.delete(g.key);
+                          return next;
+                        });
+                      }}
+                    />
+                  </span>
+                ))}
+              </FilterBox>
+              <div style={{ height: 12 }} />
+              <FilterBox message='Desmarque um tipo de solicitação, e/ou desconte os itens suspeitos, pra eles não contarem no Cycle Time.'>
+                <ToggleChip label="Descontar suspeitos" selected={cycleTimeDiscountSuspicious} onSelected={setCycleTimeDiscountSuspicious} icon="⊘" />
+                {requestTypes.map((type) => (
+                  <ToggleChip
+                    key={type}
+                    label={type}
+                    selected={!cycleTimeDiscountedRequestTypes.has(type)}
+                    onSelected={(selected) => {
+                      setCycleTimeDiscountedRequestTypes((prev) => {
+                        const next = new Set(prev);
+                        if (selected) next.delete(type);
+                        else next.add(type);
+                        return next;
+                      });
+                    }}
+                  />
+                ))}
+              </FilterBox>
+              <div style={{ height: 16 }} />
+              <CycleTimeByAreaTable
+                metrics={allMetrics.filter((m) => m.done && !isDiscountedForCycleTime(m))}
+                settings={settings}
+                selectedGroups={cycleTimeGroups}
+                minSample={3}
+                onSelect={(name, metrics) =>
+                  setPersonDialog({
+                    name,
+                    metrics,
+                    extraColumn: { label: 'Cycle Time', render: (m) => `${stageDaysSelected(m, cycleTimeGroups).toFixed(1)}d` },
+                  })
+                }
               />
               <div style={{ height: 28 }} />
               <SectionHeader
@@ -925,6 +1039,7 @@ export function TeamDashboardScreen({
               <ItemListTable metrics={userWaitMetrics} valueLabel="Dias aguardando" valueSelector={(m) => m.userDays} />
             </>
           )}
+          {tab === 3 && <RatingsTab ratings={ratings} ratingsLoading={ratingsLoading} />}
         </div>
       </div>
       {breakdownDialog && (
@@ -953,11 +1068,12 @@ export function TeamDashboardScreen({
 }
 
 /** Sits under the KPI strip, switching between the three tabs. */
-function TeamTabBar({ tab, setTab }: { tab: 0 | 1 | 2; setTab: (t: 0 | 1 | 2) => void }) {
+function TeamTabBar({ tab, setTab }: { tab: 0 | 1 | 2 | 3; setTab: (t: 0 | 1 | 2 | 3) => void }) {
   const tabs: { icon: ReactNode; label: string }[] = [
     { icon: <BarChart3 size={15} strokeWidth={2} />, label: 'Visão geral' },
     { icon: <Trophy size={15} strokeWidth={2} />, label: 'Performance' },
     { icon: <Hourglass size={15} strokeWidth={2} />, label: 'Sofrimento & filas' },
+    { icon: <Star size={15} strokeWidth={2} />, label: 'Avaliação' },
   ];
   return (
     <div style={{ display: 'flex', gap: 2, padding: 4, backgroundColor: BrandColors.tableHeader, borderRadius: 10 }}>
@@ -966,7 +1082,7 @@ function TeamTabBar({ tab, setTab }: { tab: 0 | 1 | 2; setTab: (t: 0 | 1 | 2) =>
         return (
           <button
             key={i}
-            onClick={() => setTab(i as 0 | 1 | 2)}
+            onClick={() => setTab(i as 0 | 1 | 2 | 3)}
             style={{
               flex: 1,
               display: 'flex',
@@ -990,6 +1106,138 @@ function TeamTabBar({ tab, setTab }: { tab: 0 | 1 | 2; setTab: (t: 0 | 1 | 2) =>
         );
       })}
     </div>
+  );
+}
+
+function StarsDisplay({ stars, size = 13 }: { stars: number; size?: number }) {
+  return (
+    <div style={{ display: 'flex', gap: 1 }}>
+      {[1, 2, 3, 4, 5].map((n) => (
+        <Star key={n} size={size} strokeWidth={1.75} fill={n <= stars ? '#F59E0B' : 'none'} color={n <= stars ? '#F59E0B' : '#CBD5E1'} />
+      ))}
+    </div>
+  );
+}
+
+function formatRatingDate(d: Date): string {
+  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+}
+
+/** "Avaliação": what the team gave (card_ratings, written from the
+ * Dashboard's "Avalie seus cards concluídos") grouped by setor (department)
+ * so it's easy to see which área is generating the roughest tickets —
+ * plus a placeholder for what users give back, which isn't wired to any
+ * data source yet (waiting on that to be supplied externally). */
+function RatingsTab({ ratings, ratingsLoading }: { ratings: CardRating[]; ratingsLoading: boolean }) {
+  const byDepartment = new Map<string, CardRating[]>();
+  for (const r of ratings) {
+    const dept = r.department.trim() === '' ? 'Sem setor' : r.department.trim();
+    if (!byDepartment.has(dept)) byDepartment.set(dept, []);
+    byDepartment.get(dept)!.push(r);
+  }
+  const departments = [...byDepartment.entries()].sort((a, b) => b[1].length - a[1].length);
+  const overallAvg = ratings.length === 0 ? null : ratings.reduce((s, r) => s + r.stars, 0) / ratings.length;
+  const sortedByDate = [...ratings].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+
+  return (
+    <>
+      <SectionHeader
+        icon={<Star size={17} strokeWidth={1.75} />}
+        iconColor={BrandColors.warning}
+        title="Avaliações que demos"
+        subtitle='Nota de 1 a 5 estrelas + comentário que cada responsável deu pros próprios cards concluídos, dada na tela de Dashboard dele — sobre como foi atender aquele chamado específico.'
+      />
+      <div style={{ height: 12 }} />
+      {ratingsLoading ? (
+        <div style={{ ...cardStyle(), color: '#64748B', fontSize: 13 }}>Carregando avaliações...</div>
+      ) : ratings.length === 0 ? (
+        <div style={{ ...cardStyle(), color: '#64748B', fontSize: 13 }}>Ninguém avaliou nenhum card concluído ainda.</div>
+      ) : (
+        <>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
+            <div style={{ ...cardStyle(), flex: '1 1 200px', minWidth: 180 }}>
+              <div style={{ fontSize: 12, color: '#64748B', fontWeight: 600 }}>Média geral</div>
+              <div style={{ height: 6 }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <StarsDisplay stars={Math.round(overallAvg ?? 0)} size={16} />
+                <span style={{ fontSize: 18, fontWeight: 700 }}>{overallAvg!.toFixed(1)}</span>
+              </div>
+              <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 4 }}>
+                {ratings.length} {ratings.length === 1 ? 'avaliação' : 'avaliações'}
+              </div>
+            </div>
+            {departments.map(([dept, list]) => {
+              const avg = list.reduce((s, r) => s + r.stars, 0) / list.length;
+              return (
+                <div key={dept} style={{ ...cardStyle(), flex: '1 1 200px', minWidth: 180 }}>
+                  <div style={{ fontSize: 12, color: '#64748B', fontWeight: 600 }}>{dept}</div>
+                  <div style={{ height: 6 }} />
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <StarsDisplay stars={Math.round(avg)} size={16} />
+                    <span style={{ fontSize: 18, fontWeight: 700 }}>{avg.toFixed(1)}</span>
+                  </div>
+                  <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 4 }}>
+                    {list.length} {list.length === 1 ? 'avaliação' : 'avaliações'}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ height: 20 }} />
+          <TableCard isEmpty={false} emptyMessage="">
+            <table style={tableStyle()}>
+              <thead>
+                <tr>
+                  <Th>ID</Th>
+                  <Th>Card</Th>
+                  <Th>Solicitante</Th>
+                  <Th>Setor</Th>
+                  <Th>Avaliado por</Th>
+                  <Th>Nota</Th>
+                  <Th>Comentário</Th>
+                  <Th>Data</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedByDate.map((r) => (
+                  <tr key={r.workItemId}>
+                    <Td>{r.workItemId}</Td>
+                    <Td>
+                      <span style={{ display: 'inline-block', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.itemTitle}</span>
+                    </Td>
+                    <Td>{r.requesterName.trim() === '' ? '—' : r.requesterName}</Td>
+                    <Td>{r.department.trim() === '' ? 'Sem setor' : r.department}</Td>
+                    <Td>
+                      <ResponsibleTag name={r.ratedBy} />
+                    </Td>
+                    <Td>
+                      <StarsDisplay stars={r.stars} />
+                    </Td>
+                    <Td>
+                      <span style={{ display: 'inline-block', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {r.comment.trim() === '' ? '—' : r.comment}
+                      </span>
+                    </Td>
+                    <Td>{formatRatingDate(r.createdAt)}</Td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TableCard>
+        </>
+      )}
+      <div style={{ height: 28 }} />
+      <SectionHeader
+        icon={<Star size={17} strokeWidth={1.75} />}
+        iconColor={BrandColors.developer}
+        title="Avaliações que estamos recebendo"
+        subtitle="Nota que os usuários/solicitantes dão pro nosso atendimento — ainda não integrada a nenhuma fonte de dado."
+      />
+      <div style={{ height: 12 }} />
+      <div style={{ ...cardStyle(), color: '#64748B', fontSize: 13 }}>
+        Ainda sem dado. Assim que a fonte de avaliação dos usuários for definida, ela aparece aqui do mesmo jeito.
+      </div>
+    </>
   );
 }
 
@@ -1069,6 +1317,447 @@ function DistributionPieCard({
         </div>
       )}
     </div>
+  );
+}
+
+function complexityLabelOf(m: ItemMetric): string {
+  return m.item.complexity.trim() === '' ? 'Sem complexidade' : m.item.complexity.trim();
+}
+function priorityLabelOf(m: ItemMetric): string {
+  return m.item.priority == null ? 'Sem prioridade' : `Prioridade ${m.item.priority}`;
+}
+
+/** Rows = complexidade, columns = prioridade, each cell = average time from
+ * Backlog to Concluído (first non-Triagem board column to the done moment —
+ * Triagem itself excluded, same as everywhere else in this screen) + count,
+ * among completed items in that combination. The point isn't the exact
+ * numbers but the *shape*: if higher complexity doesn't take longer, or
+ * higher priority doesn't move faster, the labels aren't tracking reality —
+ * this table exists to make that visible instead of trusting the tags at
+ * face value. */
+/** Every non-Triagem column, across all buckets — the boundary "Backlog"
+ * starts at, used to measure Backlog-to-Concluído without Triagem time
+ * baked in. */
+function nonTriageColumnsOf(settings: AppSettings): Set<string> {
+  return new Set([
+    ...settings.queueColumnSet,
+    ...settings.developerColumnSet,
+    ...settings.userColumnSet,
+    ...settings.vendorColumnSet,
+    ...settings.generalColumnSet,
+  ]);
+}
+function backlogToDoneDays(m: ItemMetric, nonTriageColumns: Set<string>): number {
+  const start = m.item.firstEnteredColumn(nonTriageColumns) ?? m.item.createdDate;
+  const end = m.endDate ?? new Date();
+  return (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
+}
+
+function ComplexityPriorityCrossTable({
+  metrics,
+  settings,
+  onSelect,
+}: {
+  metrics: ItemMetric[];
+  settings: AppSettings;
+  onSelect: (label: string, metrics: ItemMetric[]) => void;
+}) {
+  const nonTriageColumns = nonTriageColumnsOf(settings);
+  const complexityOrder = ['Baixa', 'Média', 'Alta', 'Muito Alta'];
+  const complexities = [...new Set(metrics.map(complexityLabelOf))].sort((a, b) => {
+    const ia = complexityOrder.indexOf(a);
+    const ib = complexityOrder.indexOf(b);
+    if (a === 'Sem complexidade') return 1;
+    if (b === 'Sem complexidade') return -1;
+    if (ia !== -1 && ib !== -1) return ia - ib;
+    if (ia !== -1) return -1;
+    if (ib !== -1) return 1;
+    return a.localeCompare(b);
+  });
+  const priorities = [...new Set(metrics.map(priorityLabelOf))].sort((a, b) => {
+    if (a === 'Sem prioridade') return 1;
+    if (b === 'Sem prioridade') return -1;
+    return a.localeCompare(b, undefined, { numeric: true });
+  });
+
+  const cell = new Map<string, ItemMetric[]>();
+  for (const m of metrics) {
+    const key = `${complexityLabelOf(m)}|${priorityLabelOf(m)}`;
+    if (!cell.has(key)) cell.set(key, []);
+    cell.get(key)!.push(m);
+  }
+  const cellFor = (complexity: string, priority: string) => cell.get(`${complexity}|${priority}`) ?? [];
+  const rowFor = (complexity: string) => metrics.filter((m) => complexityLabelOf(m) === complexity);
+  const colFor = (priority: string) => metrics.filter((m) => priorityLabelOf(m) === priority);
+  const avgDays = (list: ItemMetric[]) => (list.length === 0 ? null : list.reduce((s, m) => s + backlogToDoneDays(m, nonTriageColumns), 0) / list.length);
+
+  // Below this, a cell's average is more noise than signal — flagged rather
+  // than hidden, since it's still worth clicking into to see which cards
+  // they are, just not worth acting on as a trend yet.
+  const LOW_SAMPLE_THRESHOLD = 5;
+
+  if (metrics.length === 0) {
+    return <div style={{ ...cardStyle(), color: '#64748B', fontSize: 13 }}>Sem itens concluídos nesta sprint pra cruzar.</div>;
+  }
+
+  return (
+    <div style={{ ...cardStyle(), padding: 0, overflowX: 'auto' }}>
+      <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 560 }}>
+        <thead>
+          <tr>
+            <th style={crossThStyle('left')}>Complexidade \ Prioridade</th>
+            {priorities.map((p) => (
+              <th key={p} style={crossThStyle('center')}>
+                {p}
+              </th>
+            ))}
+            <th style={crossThStyle('center')}>Média geral</th>
+          </tr>
+        </thead>
+        <tbody>
+          {complexities.map((c) => {
+            const rowAvg = avgDays(rowFor(c));
+            return (
+              <tr key={c}>
+                <td style={{ ...crossTdStyle(), fontWeight: 700, color: '#1E293B' }}>{c}</td>
+                {priorities.map((p) => {
+                  const list = cellFor(c, p);
+                  const avg = avgDays(list);
+                  const lowSample = list.length > 0 && list.length < LOW_SAMPLE_THRESHOLD;
+                  return (
+                    <td key={p} style={{ ...crossTdStyle(), backgroundColor: lowSample ? BrandColors.warningBg : undefined }}>
+                      {list.length === 0 ? (
+                        <span style={{ color: '#CBD5E1' }}>—</span>
+                      ) : (
+                        <button
+                          onClick={() => onSelect(`${c} · ${p}`, list)}
+                          title={lowSample ? 'Amostra pequena (menos de 5 itens) — número ainda pouco confiável.' : undefined}
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, textAlign: 'center', width: '100%' }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                            <span style={{ fontWeight: 700, color: BrandColors.total }}>{avg!.toFixed(1)}d</span>
+                            {lowSample && <AlertTriangle size={11} strokeWidth={2.5} color={BrandColors.warning} />}
+                          </div>
+                          <div style={{ fontSize: 11, color: '#94A3B8' }}>
+                            {list.length} {list.length === 1 ? 'item' : 'itens'}
+                          </div>
+                        </button>
+                      )}
+                    </td>
+                  );
+                })}
+                <td style={{ ...crossTdStyle(), fontWeight: 700 }}>{rowAvg == null ? '—' : `${rowAvg.toFixed(1)}d`}</td>
+              </tr>
+            );
+          })}
+          <tr>
+            <td style={{ ...crossTdStyle(), fontWeight: 700, color: '#1E293B', borderTop: `2px solid ${BrandColors.border}` }}>Média geral</td>
+            {priorities.map((p) => {
+              const colAvg = avgDays(colFor(p));
+              return (
+                <td key={p} style={{ ...crossTdStyle(), fontWeight: 700, borderTop: `2px solid ${BrandColors.border}` }}>
+                  {colAvg == null ? '—' : `${colAvg.toFixed(1)}d`}
+                </td>
+              );
+            })}
+            <td style={{ ...crossTdStyle(), borderTop: `2px solid ${BrandColors.border}` }} />
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function crossThStyle(align: 'left' | 'center'): React.CSSProperties {
+  return {
+    textAlign: align,
+    padding: '10px 14px',
+    fontSize: 11.5,
+    fontWeight: 700,
+    color: '#64748B',
+    backgroundColor: BrandColors.tableHeader,
+    whiteSpace: 'nowrap',
+  };
+}
+function crossTdStyle(): React.CSSProperties {
+  return {
+    textAlign: 'center',
+    padding: '10px 14px',
+    fontSize: 13,
+    borderTop: `1px solid ${BrandColors.border}`,
+    whiteSpace: 'nowrap',
+  };
+}
+
+type LabelDimension = 'complexity' | 'priority';
+
+interface LabelDeviationRow {
+  name: string;
+  label: string;
+  count: number;
+  personAvgDays: number;
+  teamAvgDays: number;
+  deviationDays: number;
+  metrics: ItemMetric[];
+}
+
+/** Same idea as the cross table above, one level deeper: for each
+ * responsible + label (complexidade or prioridade) with enough completed
+ * items of their own, compares their average Backlog-to-Concluído time
+ * against the team's average for that same label — a big deviation means
+ * that person's cards under that label aren't behaving like the rest of the
+ * team's cards under it, which is what "etiquetando errado" would look like
+ * in the data. Requires `minSample` items *for that person, in that label*
+ * before showing a row at all — below that, the number is closer to noise
+ * than signal, and flagging someone off of 1-2 cards isn't fair. */
+function LabelConsistencyTable({
+  metrics,
+  settings,
+  dimension,
+  minSample,
+  onSelect,
+}: {
+  metrics: ItemMetric[];
+  settings: AppSettings;
+  dimension: LabelDimension;
+  minSample: number;
+  onSelect: (label: string, metrics: ItemMetric[]) => void;
+}) {
+  const nonTriageColumns = nonTriageColumnsOf(settings);
+  const labelOf = dimension === 'complexity' ? complexityLabelOf : priorityLabelOf;
+  const days = (m: ItemMetric) => backlogToDoneDays(m, nonTriageColumns);
+
+  const byLabel = new Map<string, ItemMetric[]>();
+  for (const m of metrics) {
+    const label = labelOf(m);
+    if (label.startsWith('Sem ')) continue;
+    if (!byLabel.has(label)) byLabel.set(label, []);
+    byLabel.get(label)!.push(m);
+  }
+  const teamAvgByLabel = new Map<string, number>();
+  for (const [label, list] of byLabel.entries()) {
+    teamAvgByLabel.set(label, list.reduce((s, m) => s + days(m), 0) / list.length);
+  }
+
+  // Additive, same rule as the rest of the app (isAttributedTo): a card
+  // always counts for whoever it's literally assigned to, and *also* counts
+  // for settings.myDisplayName when it's tagged for him but assigned to
+  // someone else — once it's done, or currently in Desenvolvedor. Without
+  // this, work he's effectively driving through someone else's account
+  // would never show up under his own consistency numbers.
+  //
+  // But the *time* counted differs by how it's attributed: for a card
+  // literally assigned to them, the full Backlog-to-Concluído span is
+  // theirs. For a card only tag-attributed, they were never on the hook for
+  // Triagem/Fila/Usuário/Fornecedor on someone else's card — only for the
+  // Desenvolvimento stretch, whatever the tag actually credits — so it's
+  // cycleTimeDays instead, or the whole span would inflate their number
+  // with time they had no part in.
+  const tagOwner = settings.myDisplayName.trim();
+  const byPersonLabel = new Map<string, { metric: ItemMetric; viaTag: boolean }[]>();
+  for (const m of metrics) {
+    const label = labelOf(m);
+    if (label.startsWith('Sem ')) continue;
+    const name = m.item.assignedTo.trim();
+    if (name === '') continue;
+    const key = `${name}|${label}`;
+    if (!byPersonLabel.has(key)) byPersonLabel.set(key, []);
+    byPersonLabel.get(key)!.push({ metric: m, viaTag: false });
+    if (tagOwner !== '' && name.toLowerCase() !== tagOwner.toLowerCase() && isAttributedTo(m, tagOwner, settings)) {
+      const tagKey = `${tagOwner}|${label}`;
+      if (!byPersonLabel.has(tagKey)) byPersonLabel.set(tagKey, []);
+      byPersonLabel.get(tagKey)!.push({ metric: m, viaTag: true });
+    }
+  }
+
+  const rows: LabelDeviationRow[] = [];
+  for (const [key, entries] of byPersonLabel.entries()) {
+    if (entries.length < minSample) continue;
+    const [name, label] = key.split('|');
+    const teamAvg = teamAvgByLabel.get(label);
+    if (teamAvg == null) continue;
+    const personAvg = entries.reduce((s, e) => s + (e.viaTag ? e.metric.cycleTimeDays : days(e.metric)), 0) / entries.length;
+    rows.push({
+      name,
+      label,
+      count: entries.length,
+      personAvgDays: personAvg,
+      teamAvgDays: teamAvg,
+      deviationDays: personAvg - teamAvg,
+      metrics: entries.map((e) => e.metric),
+    });
+  }
+  // Grouped by person first (ranked by that person's worst deviation, so
+  // whoever's most off the team's pace still floats to the top) rather than
+  // sorted purely by deviation size — otherwise the same person's rows for
+  // complexidade/prioridade scatter across the table, which reads as more
+  // people having an issue than actually do.
+  const worstDeviationByName = new Map<string, number>();
+  for (const r of rows) {
+    const current = worstDeviationByName.get(r.name) ?? 0;
+    if (Math.abs(r.deviationDays) > Math.abs(current)) worstDeviationByName.set(r.name, r.deviationDays);
+  }
+  rows.sort((a, b) => {
+    if (a.name !== b.name) return Math.abs(worstDeviationByName.get(b.name)!) - Math.abs(worstDeviationByName.get(a.name)!);
+    return Math.abs(b.deviationDays) - Math.abs(a.deviationDays);
+  });
+
+  if (rows.length === 0) {
+    return (
+      <div style={{ ...cardStyle(), color: '#64748B', fontSize: 13 }}>
+        Ninguém tem itens suficientes (mínimo {minSample}) numa mesma etiqueta pra comparar ainda.
+      </div>
+    );
+  }
+
+  return (
+    <TableCard isEmpty={false} emptyMessage="">
+      <table style={tableStyle()}>
+        <thead>
+          <tr>
+            <Th>Responsável</Th>
+            <Th>Etiqueta</Th>
+            <Th>Itens dele</Th>
+            <Th>Média dele</Th>
+            <Th>Média do time</Th>
+            <Th>Desvio</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={`${r.name}|${r.label}`} style={{ cursor: 'pointer' }} onClick={() => onSelect(`${r.name} · ${r.label}`, r.metrics)}>
+              <Td>
+                <ResponsibleTag name={r.name} />
+              </Td>
+              <Td>{r.label}</Td>
+              <Td>{r.count}</Td>
+              <Td>{r.personAvgDays.toFixed(1)}d</Td>
+              <Td>{r.teamAvgDays.toFixed(1)}d</Td>
+              <Td>
+                <span style={{ fontWeight: 700, color: r.deviationDays > 0 ? BrandColors.danger : BrandColors.user }}>
+                  {r.deviationDays > 0 ? '+' : ''}
+                  {r.deviationDays.toFixed(1)}d
+                </span>
+              </Td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </TableCard>
+  );
+}
+
+/** Sums exactly the stage-day getters whose Ranking de performance chip is
+ * marked (Triagem/Fila/Desenvolvedor/Usuário/Fornecedor/Geral) — same chips,
+ * same meaning: "Cycle Time" here isn't fixed to Desenvolvimento alone, it's
+ * whatever mix of stages the team currently wants counted as real elapsed
+ * work, same denominator the Base above already uses for open items. */
+function stageDaysSelected(m: ItemMetric, selectedGroups: Set<string>): number {
+  let total = 0;
+  if (selectedGroups.has('triagem')) total += m.triageDays;
+  if (selectedGroups.has('fila')) total += m.queueDays;
+  if (selectedGroups.has('desenvolvedor')) total += m.cycleTimeDays;
+  if (selectedGroups.has('usuario')) total += m.userDays;
+  if (selectedGroups.has('fornecedor')) total += m.vendorDays;
+  if (selectedGroups.has('geral')) total += m.generalDays;
+  return total;
+}
+
+/** Per-responsible Cycle Time (sum of the stages selected via the chips
+ * above) against the team's average — plus two fixed reference columns
+ * (Dados, Sustentação) so any row can be read against whichever area's
+ * benchmark is actually relevant to that person, not just the team-wide
+ * blend; either shows "—" when nobody on the team has a completed item in
+ * that area at all. Same additive tag rule as everywhere else: a card
+ * tag-attributed to settings.myDisplayName also counts for him — but only
+ * for the Desenvolvedor stretch (cycleTimeDays), whatever the chips say,
+ * since that's the one stage the tag actually credits on someone else's
+ * card; counting the rest of their stages too would inflate him with time
+ * he had no part in. Requires `minSample` completed items before a person
+ * gets a row at all. */
+function CycleTimeByAreaTable({
+  metrics,
+  settings,
+  selectedGroups,
+  minSample,
+  onSelect,
+}: {
+  metrics: ItemMetric[];
+  settings: AppSettings;
+  selectedGroups: Set<string>;
+  minSample: number;
+  onSelect: (name: string, metrics: ItemMetric[]) => void;
+}) {
+  const avg = (list: ItemMetric[]) => (list.length === 0 ? null : list.reduce((s, m) => s + stageDaysSelected(m, selectedGroups), 0) / list.length);
+  const teamAvg = avg(metrics) ?? 0;
+  const dadosAvg = avg(metrics.filter((m) => areaLeaf(m.item.areaPath) === 'Dados'));
+  const sustentacaoAvg = avg(metrics.filter((m) => areaLeaf(m.item.areaPath) === 'Sustentação'));
+
+  const tagOwner = settings.myDisplayName.trim();
+  const byPerson = new Map<string, { metric: ItemMetric; viaTag: boolean }[]>();
+  for (const m of metrics) {
+    const name = m.item.assignedTo.trim();
+    if (name === '') continue;
+    if (!byPerson.has(name)) byPerson.set(name, []);
+    byPerson.get(name)!.push({ metric: m, viaTag: false });
+    if (tagOwner !== '' && name.toLowerCase() !== tagOwner.toLowerCase() && isAttributedTo(m, tagOwner, settings)) {
+      if (!byPerson.has(tagOwner)) byPerson.set(tagOwner, []);
+      byPerson.get(tagOwner)!.push({ metric: m, viaTag: true });
+    }
+  }
+
+  const rows = [...byPerson.entries()]
+    .filter(([, entries]) => entries.length >= minSample)
+    .map(([name, entries]) => {
+      const personAvg = entries.reduce((s, e) => s + (e.viaTag ? e.metric.cycleTimeDays : stageDaysSelected(e.metric, selectedGroups)), 0) / entries.length;
+      return { name, count: entries.length, personAvg, deviation: personAvg - teamAvg, items: entries.map((e) => e.metric) };
+    })
+    .sort((a, b) => Math.abs(b.deviation) - Math.abs(a.deviation));
+
+  if (rows.length === 0) {
+    return (
+      <div style={{ ...cardStyle(), color: '#64748B', fontSize: 13 }}>
+        Ninguém com itens suficientes (mínimo {minSample}) pra comparar ainda.
+      </div>
+    );
+  }
+
+  return (
+    <TableCard isEmpty={false} emptyMessage="">
+      <table style={tableStyle()}>
+        <thead>
+          <tr>
+            <Th>Responsável</Th>
+            <Th>Itens</Th>
+            <Th>Cycle Time dele</Th>
+            <Th>Cycle Time equipe</Th>
+            <Th>Desvio</Th>
+            <Th>Cycle Time Dados</Th>
+            <Th>Cycle Time Sustentação</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.name} style={{ cursor: 'pointer' }} onClick={() => onSelect(r.name, r.items)}>
+              <Td>
+                <ResponsibleTag name={r.name} />
+              </Td>
+              <Td>{r.count}</Td>
+              <Td>{r.personAvg.toFixed(1)}d</Td>
+              <Td>{teamAvg.toFixed(1)}d</Td>
+              <Td>
+                <span style={{ fontWeight: 700, color: r.deviation > 0 ? BrandColors.danger : BrandColors.user }}>
+                  {r.deviation > 0 ? '+' : ''}
+                  {r.deviation.toFixed(1)}d
+                </span>
+              </Td>
+              <Td>{dadosAvg == null ? '—' : `${dadosAvg.toFixed(1)}d`}</Td>
+              <Td>{sustentacaoAvg == null ? '—' : `${sustentacaoAvg.toFixed(1)}d`}</Td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </TableCard>
   );
 }
 

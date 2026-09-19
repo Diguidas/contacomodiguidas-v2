@@ -82,3 +82,35 @@ create policy "admin updates config" on app_config
 insert into app_users (email, role, responsavel_name)
 values ('seu-email@pole.com.br', 'admin', null)
 on conflict (email) do update set role = 'admin';
+
+-- card_ratings: a avaliação (5 estrelas + comentário) que o próprio
+-- responsável dá pra um card que ele concluiu — sobre o atendimento daquele
+-- chamado/solicitante, uma nota por card. department/requester_name/
+-- item_title ficam copiados aqui (não só o id) porque vêm do Azure DevOps,
+-- não do Supabase — sem isso, toda tela que quisesse mostrar essas notas
+-- precisaria voltar a cruzar com uma busca cara na API só pra saber o
+-- título ou o setor do card avaliado.
+create table if not exists card_ratings (
+  id uuid primary key default gen_random_uuid(),
+  work_item_id int not null unique,
+  rated_by text not null,
+  department text not null default '',
+  requester_name text not null default '',
+  item_title text not null default '',
+  stars int not null check (stars between 1 and 5),
+  comment text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table card_ratings enable row level security;
+
+-- Time inteiro precisa ver as notas de todo mundo (Visão do time, tela de
+-- Usuários) — só quem pode logar já é confiável o bastante pra escrever
+-- também (é o próprio responsável avaliando o card dele).
+create policy "any authenticated user reads ratings" on card_ratings
+  for select using (auth.role() = 'authenticated');
+create policy "any authenticated user writes ratings" on card_ratings
+  for insert with check (auth.role() = 'authenticated');
+create policy "any authenticated user updates ratings" on card_ratings
+  for update using (auth.role() = 'authenticated');

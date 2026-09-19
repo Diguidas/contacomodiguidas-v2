@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Menu, RefreshCw, Home, Users, LineChart, Clock, FolderClock, Link2, Briefcase, ShieldCheck, LogOut } from 'lucide-react';
+import { Menu, RefreshCw, Home, Users, Contact, LineChart, Clock, Settings, Briefcase, LogOut, Sunrise, ChevronLeft, ChevronRight } from 'lucide-react';
 import { WorkItem } from '../models/workItem';
 import { AzureDevOpsService } from '../services/azureDevOpsService';
 import { AppSettings } from '../services/settingsService';
 import { SupabaseConfigService } from '../services/supabaseConfigService';
+import { CardRating, CardRatingService } from '../services/cardRatingService';
 import type { AppUser } from '../services/authService';
 import { Sprint, SprintService } from '../services/sprintService';
 import { BrandColors } from '../theme';
@@ -11,17 +12,18 @@ import abapinhoLogo from '../assets/abapinho.png';
 import poletechBadge from '../assets/poletech.png';
 import { DashboardScreen } from './DashboardScreen';
 import { TeamDashboardScreen } from './TeamDashboardScreen';
+import { DailyScreen } from './DailyScreen';
+import { UsersScreen } from './UsersScreen';
 import { HistoryScreen } from './HistoryScreen';
 import { SlaScreen } from './SlaScreen';
-import { GroupingScreen } from './GroupingScreen';
-import { SettingsScreen } from './SettingsScreen';
+import { ConfiguracoesScreen } from './ConfiguracoesScreen';
 import { ProjectsScreen } from './ProjectsScreen';
-import { AdminScreen } from './AdminScreen';
 
-type Destination = 'dashboard' | 'team' | 'history' | 'sla' | 'grouping' | 'connection' | 'projects' | 'admin';
+type Destination = 'dashboard' | 'team' | 'daily' | 'users' | 'history' | 'sla' | 'projects' | 'settings';
 
 const configService = new SupabaseConfigService();
 const sprintService = new SprintService();
+const cardRatingService = new CardRatingService();
 
 /** App-wide shell: owns the settings/data state and renders a persistent
  * sidebar. `appUser` (resolved by AuthGate before this ever mounts) decides
@@ -51,6 +53,7 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
   // also widens the cached window to cover it from then on.
   const [cachedFromSprintNumber, setCachedFromSprintNumber] = useState<number | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   // The main content area is one scrollable div shared by every screen —
   // React doesn't reset its scrollTop just because a different screen (or a
   // different internal tab, e.g. Visão do time's Ranking/WIP/Sofrimento)
@@ -69,6 +72,40 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [historySprintCount, setHistorySprintCount] = useState(6);
+
+  // card_ratings, loaded once here (not per-screen) so Dashboard (who's
+  // writing them), Visão do time and Usuários (who are both just reading)
+  // always see the same list without each firing its own fetch.
+  const [ratings, setRatings] = useState<CardRating[]>([]);
+  const [ratingsLoading, setRatingsLoading] = useState(false);
+
+  async function refreshRatings() {
+    setRatingsLoading(true);
+    try {
+      setRatings(await cardRatingService.loadAll());
+    } catch (e) {
+      console.error('Falha ao carregar avaliações:', e);
+    } finally {
+      setRatingsLoading(false);
+    }
+  }
+
+  async function saveRating(init: {
+    workItemId: number;
+    ratedBy: string;
+    department: string;
+    requesterName: string;
+    itemTitle: string;
+    stars: number;
+    comment: string;
+  }) {
+    await cardRatingService.save(init);
+    await refreshRatings();
+  }
+
+  useEffect(() => {
+    refreshRatings();
+  }, []);
 
   useEffect(() => {
     function onResize() {
@@ -267,7 +304,15 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         {!isNarrow && (
           <>
-            <Sidebar settings={settings} appUser={appUser} destination={destination} onSelect={selectDestination} onSignOut={onSignOut} />
+            <Sidebar
+              settings={settings}
+              appUser={appUser}
+              destination={destination}
+              onSelect={selectDestination}
+              onSignOut={onSignOut}
+              collapsed={sidebarCollapsed}
+              onToggleCollapse={() => setSidebarCollapsed((v) => !v)}
+            />
           </>
         )}
         {isNarrow && drawerOpen && (
@@ -302,9 +347,10 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
               onRefresh={() => refresh()}
               onSprintChanged={onSprintChanged}
               lockedResponsible={isAdmin ? undefined : (appUser.responsavelName ?? undefined)}
+              ratings={ratings}
+              onSaveRating={saveRating}
             />
           )}
-          {destination === 'admin' && isAdmin && <AdminScreen />}
           {destination === 'projects' && (
             <ProjectsScreen
               settings={settings}
@@ -325,6 +371,24 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
               sprints={sprints.current}
               onSprintChanged={onSprintChanged}
               onTabChange={() => contentRef.current?.scrollTo(0, 0)}
+              ratings={ratings}
+              ratingsLoading={ratingsLoading}
+            />
+          )}
+          {destination === 'daily' && (
+            <DailyScreen settings={settings} items={items} loading={loading} error={error} />
+          )}
+          {destination === 'users' && (
+            <UsersScreen
+              settings={settings}
+              items={items}
+              loading={loading}
+              error={error}
+              selectedSprint={selectedSprint}
+              sprints={sprints.current}
+              onSprintChanged={onSprintChanged}
+              ratings={ratings}
+              ratingsLoading={ratingsLoading}
             />
           )}
           {destination === 'history' && (
@@ -347,11 +411,8 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
               onRefresh={() => loadHistory(true)}
             />
           )}
-          {destination === 'grouping' && (
-            <GroupingScreen settings={settings} items={items} onSaved={saveSettings} />
-          )}
-          {destination === 'connection' && (
-            <SettingsScreen initialSettings={settings} onSaved={saveSettings} />
+          {destination === 'settings' && isAdmin && (
+            <ConfiguracoesScreen settings={settings} items={items} onSaved={saveSettings} />
           )}
         </div>
       </div>
@@ -378,22 +439,29 @@ function Sidebar({
   destination,
   onSelect,
   onSignOut,
+  collapsed = false,
+  onToggleCollapse,
 }: {
   settings: AppSettings;
   appUser: AppUser;
   destination: Destination;
   onSelect: (d: Destination) => void;
   onSignOut: () => void;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
 }) {
   const isAdmin = appUser.role === 'admin';
   // A responsável logged in sees who they're browsing as; an admin still
   // reads by the shared "tag owner" name (settings.myDisplayName) here,
   // same as before — that name isn't tied to whoever's logged in.
   const displayName = appUser.responsavelName ?? settings.myDisplayName;
+  // Collapsed: the name/role text and inline "Sair" button have no room, so
+  // they move into a small popover that opens off the avatar instead.
+  const [showUserMenu, setShowUserMenu] = useState(false);
   return (
     <div
       style={{
-        width: 240,
+        width: collapsed ? 72 : 240,
         backgroundColor: '#FFFFFF',
         display: 'flex',
         flexDirection: 'column',
@@ -401,111 +469,224 @@ function Sidebar({
         boxShadow: '1px 0 2px rgba(15, 23, 42, 0.05)',
         position: 'relative',
         zIndex: 1,
+        transition: 'width 0.15s ease',
+        flexShrink: 0,
       }}
     >
+      {onToggleCollapse && (
+        <div style={{ display: 'flex', justifyContent: collapsed ? 'center' : 'flex-end', padding: '10px 12px 0' }}>
+          <button
+            onClick={onToggleCollapse}
+            title={collapsed ? 'Expandir menu' : 'Recolher menu'}
+            aria-label={collapsed ? 'Expandir menu' : 'Recolher menu'}
+            style={{
+              background: 'none',
+              border: `1px solid ${BrandColors.border}`,
+              borderRadius: 8,
+              padding: 6,
+              cursor: 'pointer',
+              color: '#64748B',
+              display: 'flex',
+              alignItems: 'center',
+            }}
+          >
+            {collapsed ? <ChevronRight size={14} strokeWidth={2} /> : <ChevronLeft size={14} strokeWidth={2} />}
+          </button>
+        </div>
+      )}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-        <NavItem icon={<Home size={16} strokeWidth={2} />} label="Dashboard" selected={destination === 'dashboard'} onClick={() => onSelect('dashboard')} />
+        <NavItem icon={<Home size={16} strokeWidth={2} />} label="Dashboard" selected={destination === 'dashboard'} onClick={() => onSelect('dashboard')} collapsed={collapsed} />
         {isAdmin && (
           <>
-            <NavItem icon={<Users size={16} strokeWidth={2} />} label="Visão do time" selected={destination === 'team'} onClick={() => onSelect('team')} />
-            <NavItem icon={<Briefcase size={16} strokeWidth={2} />} label="Projetos" selected={destination === 'projects'} onClick={() => onSelect('projects')} />
-            <NavItem icon={<LineChart size={16} strokeWidth={2} />} label="Cycle Time & Histórico" selected={destination === 'history'} onClick={() => onSelect('history')} />
-            <NavItem icon={<Clock size={16} strokeWidth={2} />} label="SLA" selected={destination === 'sla'} onClick={() => onSelect('sla')} />
-            <NavItem icon={<FolderClock size={16} strokeWidth={2} />} label="Agrupamento" selected={destination === 'grouping'} onClick={() => onSelect('grouping')} />
-            <NavItem icon={<Link2 size={16} strokeWidth={2} />} label="Conexão" selected={destination === 'connection'} onClick={() => onSelect('connection')} />
-            <NavItem icon={<ShieldCheck size={16} strokeWidth={2} />} label="Administração" selected={destination === 'admin'} onClick={() => onSelect('admin')} />
+            <NavItem icon={<Users size={16} strokeWidth={2} />} label="Visão do time" selected={destination === 'team'} onClick={() => onSelect('team')} collapsed={collapsed} />
+            <NavItem icon={<Sunrise size={16} strokeWidth={2} />} label="Daily" selected={destination === 'daily'} onClick={() => onSelect('daily')} collapsed={collapsed} />
+            <NavItem icon={<Contact size={16} strokeWidth={2} />} label="Usuários" selected={destination === 'users'} onClick={() => onSelect('users')} collapsed={collapsed} />
+            <NavItem icon={<Briefcase size={16} strokeWidth={2} />} label="Projetos" selected={destination === 'projects'} onClick={() => onSelect('projects')} collapsed={collapsed} />
+            <NavItem icon={<LineChart size={16} strokeWidth={2} />} label="Cycle Time & Histórico" selected={destination === 'history'} onClick={() => onSelect('history')} collapsed={collapsed} />
+            <NavItem icon={<Clock size={16} strokeWidth={2} />} label="SLA" selected={destination === 'sla'} onClick={() => onSelect('sla')} collapsed={collapsed} />
+            <NavItem icon={<Settings size={16} strokeWidth={2} />} label="Configurações" selected={destination === 'settings'} onClick={() => onSelect('settings')} collapsed={collapsed} />
           </>
         )}
       </div>
-      <div style={{ padding: '0 12px 12px' }}>
+      <div style={{ padding: '0 12px 12px', position: 'relative' }}>
+        {collapsed ? (
+          <button
+            onClick={() => setShowUserMenu((v) => !v)}
+            title={displayName}
+            aria-label={`Conta de ${displayName}`}
+            style={{
+              width: '100%',
+              display: 'flex',
+              justifyContent: 'center',
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              cursor: 'pointer',
+            }}
+          >
+            <div
+              style={{
+                width: 34,
+                height: 34,
+                borderRadius: '50%',
+                backgroundColor: BrandColors.primaryLightBg,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontWeight: 700,
+                color: BrandColors.primaryDark,
+                fontSize: 12.5,
+                flexShrink: 0,
+              }}
+            >
+              {initials(displayName)}
+            </div>
+          </button>
+        ) : (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              padding: '10px 12px',
+              borderRadius: 12,
+              backgroundColor: '#F8FAFC',
+              border: `1px solid ${BrandColors.border}`,
+            }}
+          >
+            <div
+              style={{
+                width: 34,
+                height: 34,
+                borderRadius: '50%',
+                backgroundColor: BrandColors.primaryLightBg,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontWeight: 700,
+                color: BrandColors.primaryDark,
+                fontSize: 12.5,
+                flexShrink: 0,
+              }}
+            >
+              {initials(displayName)}
+            </div>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div
+                style={{
+                  fontWeight: 600,
+                  fontSize: 13,
+                  color: '#1E293B',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+                title={appUser.email}
+              >
+                {shortName(displayName)}
+              </div>
+              <div style={{ fontSize: 11, color: '#94A3B8', fontWeight: 500 }}>
+                {isAdmin ? 'Administrador' : 'Responsável'}
+              </div>
+            </div>
+            <button
+              onClick={onSignOut}
+              title="Sair"
+              aria-label="Sair"
+              style={{
+                background: 'none',
+                border: 'none',
+                padding: 6,
+                borderRadius: 8,
+                cursor: 'pointer',
+                color: '#94A3B8',
+                display: 'flex',
+                alignItems: 'center',
+                flexShrink: 0,
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.backgroundColor = '#EEF2F6';
+                e.currentTarget.style.color = BrandColors.danger;
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = 'transparent';
+                e.currentTarget.style.color = '#94A3B8';
+              }}
+            >
+              <LogOut size={15} strokeWidth={2} />
+            </button>
+          </div>
+        )}
+        {collapsed && showUserMenu && (
+          <>
+            <div style={{ position: 'fixed', inset: 0, zIndex: 19 }} onClick={() => setShowUserMenu(false)} />
+            <div
+              style={{
+                position: 'absolute',
+                left: '100%',
+                bottom: 0,
+                marginLeft: 8,
+                width: 200,
+                backgroundColor: '#FFFFFF',
+                borderRadius: 12,
+                border: `1px solid ${BrandColors.border}`,
+                boxShadow: '0 4px 16px rgba(15, 23, 42, 0.12)',
+                zIndex: 20,
+                overflow: 'hidden',
+              }}
+            >
+              <div style={{ padding: '10px 14px', borderBottom: `1px solid ${BrandColors.border}` }}>
+                <div
+                  style={{ fontWeight: 600, fontSize: 13, color: '#1E293B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                  title={appUser.email}
+                >
+                  {shortName(displayName)}
+                </div>
+                <div style={{ fontSize: 11, color: '#94A3B8', fontWeight: 500 }}>{isAdmin ? 'Administrador' : 'Responsável'}</div>
+              </div>
+              <button
+                onClick={() => {
+                  setShowUserMenu(false);
+                  onSignOut();
+                }}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '10px 14px',
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  color: BrandColors.danger,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  textAlign: 'left',
+                }}
+              >
+                <LogOut size={14} strokeWidth={2} />
+                Sair
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+      {!collapsed && (
         <div
           style={{
             display: 'flex',
             alignItems: 'center',
-            gap: 10,
-            padding: '10px 12px',
-            borderRadius: 12,
-            backgroundColor: '#F8FAFC',
-            border: `1px solid ${BrandColors.border}`,
+            justifyContent: 'center',
+            gap: 6,
+            padding: '10px 16px',
+            borderTop: `1px solid ${BrandColors.border}`,
+            backgroundColor: '#FAFBFC',
           }}
         >
-          <div
-            style={{
-              width: 34,
-              height: 34,
-              borderRadius: '50%',
-              backgroundColor: BrandColors.primaryLightBg,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontWeight: 700,
-              color: BrandColors.primaryDark,
-              fontSize: 12.5,
-              flexShrink: 0,
-            }}
-          >
-            {initials(displayName)}
-          </div>
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div
-              style={{
-                fontWeight: 600,
-                fontSize: 13,
-                color: '#1E293B',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-              title={appUser.email}
-            >
-              {shortName(displayName)}
-            </div>
-            <div style={{ fontSize: 11, color: '#94A3B8', fontWeight: 500 }}>
-              {isAdmin ? 'Administrador' : 'Responsável'}
-            </div>
-          </div>
-          <button
-            onClick={onSignOut}
-            title="Sair"
-            aria-label="Sair"
-            style={{
-              background: 'none',
-              border: 'none',
-              padding: 6,
-              borderRadius: 8,
-              cursor: 'pointer',
-              color: '#94A3B8',
-              display: 'flex',
-              alignItems: 'center',
-              flexShrink: 0,
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.backgroundColor = '#EEF2F6';
-              e.currentTarget.style.color = BrandColors.danger;
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = 'transparent';
-              e.currentTarget.style.color = '#94A3B8';
-            }}
-          >
-            <LogOut size={15} strokeWidth={2} />
-          </button>
+          <span style={{ fontSize: 10, color: '#B0B9C6', letterSpacing: 0.3 }}>desenvolvido por</span>
+          <img src={poletechBadge} alt="Pole Tech" style={{ height: 18, objectFit: 'contain', opacity: 0.85 }} />
         </div>
-      </div>
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 6,
-          padding: '10px 16px',
-          borderTop: `1px solid ${BrandColors.border}`,
-          backgroundColor: '#FAFBFC',
-        }}
-      >
-        <span style={{ fontSize: 10, color: '#B0B9C6', letterSpacing: 0.3 }}>desenvolvido por</span>
-        <img src={poletechBadge} alt="Pole Tech" style={{ height: 18, objectFit: 'contain', opacity: 0.85 }} />
-      </div>
+      )}
     </div>
   );
 }
@@ -515,20 +696,24 @@ function NavItem({
   label,
   selected,
   onClick,
+  collapsed = false,
 }: {
   icon: ReactNode;
   label: string;
   selected: boolean;
   onClick: () => void;
+  collapsed?: boolean;
 }) {
   return (
-    <div style={{ padding: '4px 12px' }}>
+    <div style={{ padding: collapsed ? '4px 8px' : '4px 12px' }}>
       <button
         onClick={onClick}
+        title={collapsed ? label : undefined}
         style={{
           width: '100%',
           display: 'flex',
           alignItems: 'center',
+          justifyContent: collapsed ? 'center' : 'flex-start',
           gap: 12,
           padding: '12px',
           borderRadius: 10,
@@ -545,19 +730,25 @@ function NavItem({
             alignItems: 'center',
             justifyContent: 'center',
             color: selected ? '#FFFFFF' : '#334155',
+            flexShrink: 0,
           }}
         >
           {icon}
         </span>
-        <span
-          style={{
-            fontWeight: selected ? 700 : 400,
-            color: selected ? '#FFFFFF' : '#334155',
-            fontSize: 14,
-          }}
-        >
-          {label}
-        </span>
+        {!collapsed && (
+          <span
+            style={{
+              fontWeight: selected ? 700 : 400,
+              color: selected ? '#FFFFFF' : '#334155',
+              fontSize: 14,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {label}
+          </span>
+        )}
       </button>
     </div>
   );

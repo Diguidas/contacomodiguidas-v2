@@ -21,8 +21,10 @@ import {
 import { AppSettings } from '../services/settingsService';
 import { Sprint, SprintService } from '../services/sprintService';
 import { buildHealthScoreRanking } from '../services/sprintSnapshotService';
+import { CardRating } from '../services/cardRatingService';
 import { BrandColors } from '../theme';
 import { ToggleChip } from '../components/ToggleChip';
+import { Star } from 'lucide-react';
 import abapinhoLogo from '../assets/abapinho.png';
 import {
   AlertTriangle,
@@ -183,6 +185,8 @@ export function DashboardScreen({
   onRefresh,
   onSprintChanged,
   lockedResponsible,
+  ratings,
+  onSaveRating,
 }: {
   settings: AppSettings;
   items: WorkItem[];
@@ -197,8 +201,19 @@ export function DashboardScreen({
   // disappears entirely and every filter is pinned to this name, so a
   // regular user can only ever see their own data, not just default to it.
   lockedResponsible?: string;
+  ratings: CardRating[];
+  onSaveRating: (init: {
+    workItemId: number;
+    ratedBy: string;
+    department: string;
+    requesterName: string;
+    itemTitle: string;
+    stars: number;
+    comment: string;
+  }) => Promise<void>;
 }) {
   const completedSectionRef = useRef<HTMLDivElement>(null);
+  const [showRateDialog, setShowRateDialog] = useState(false);
 
   // "Active" filters — what's actually applied to the data right now. The
   // "Responsável" dropdown is just a name: picking settings.myDisplayName
@@ -513,6 +528,32 @@ export function DashboardScreen({
           categoryColorFor={categoryColorFor}
           onSelectItem={setDetailItem}
         />
+        {selectedSpecificPerson != null && (
+          <>
+            <div style={{ height: 20 }} />
+            <div style={{ display: 'flex', justifyContent: 'center' }}>
+              <button
+                onClick={() => setShowRateDialog(true)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '10px 18px',
+                  borderRadius: 8,
+                  border: `1px solid ${BrandColors.primary}`,
+                  backgroundColor: BrandColors.primaryLightBg,
+                  color: BrandColors.primaryDark,
+                  fontWeight: 600,
+                  fontSize: 13,
+                  cursor: 'pointer',
+                }}
+              >
+                <Star size={15} strokeWidth={2} />
+                Avaliar cards concluídos desta sprint
+              </button>
+            </div>
+          </>
+        )}
         <div style={{ height: 16 }} />
         <Footer lastUpdated={lastUpdated} onRefresh={onRefresh} />
       </div>
@@ -523,6 +564,15 @@ export function DashboardScreen({
           openedSprintNumber={openedSprintNumber(detailItem.item)}
           timeInCurrentColumn={timeInCurrentColumnDays(detailItem.item)}
           onClose={() => setDetailItem(null)}
+        />
+      )}
+      {showRateDialog && selectedSpecificPerson != null && (
+        <RateCompletedCardsDialog
+          metrics={summary.metrics}
+          ratedBy={selectedSpecificPerson}
+          ratings={ratings}
+          onSaveRating={onSaveRating}
+          onClose={() => setShowRateDialog(false)}
         />
       )}
     </div>
@@ -1052,6 +1102,18 @@ function boardColumnAverages(completed: ItemMetric[]): { column: string; avgDays
  * one everything else on this screen uses — right after a new sprint
  * starts there's barely anything closed yet, which would make this read as
  * near-empty for no real reason. */
+// The 6 groups every column gets bucketed into per Agrupamento — same
+// getters ItemMetric already exposes, just laid out as one row so the
+// group-level picture reads before the column-by-column detail below it.
+const GROUP_AVERAGES: { label: string; color: string; selector: (m: ItemMetric) => number }[] = [
+  { label: 'Triagem', color: BrandColors.triage, selector: (m) => m.triageDays },
+  { label: 'Fila', color: BrandColors.queue, selector: (m) => m.queueDays },
+  { label: 'Desenvolvedor', color: BrandColors.developer, selector: (m) => m.cycleTimeDays },
+  { label: 'Usuário', color: BrandColors.user, selector: (m) => m.userDays },
+  { label: 'Fornecedor', color: BrandColors.vendor, selector: (m) => m.vendorDays },
+  { label: 'Geral', color: BrandColors.general, selector: (m) => m.generalDays },
+];
+
 function ColumnAverageCard({ summary, personName }: { summary: MetricsSummary; personName: string }) {
   const rows = boardColumnAverages(summary.completed);
   const avgTotal = summary.averageMetricDays((m) => m.totalDays);
@@ -1064,19 +1126,37 @@ function ColumnAverageCard({ summary, personName }: { summary: MetricsSummary; p
         boa mesmo no início dela).
       </div>
       <div style={{ height: 16 }} />
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'center' }}>
+        <div style={{ minWidth: 96 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: BrandColors.total, flexShrink: 0 }} />
+            <span style={{ fontSize: 12, color: '#64748B', fontWeight: 600 }}>Total (Backlog → Concluído)</span>
+          </div>
+          <div style={{ height: 4 }} />
+          <div style={{ fontSize: 22, fontWeight: 'bold', color: BrandColors.total }}>{avgTotal != null ? `${avgTotal.toFixed(1)}d` : '—'}</div>
+        </div>
+        <div style={{ width: 1, alignSelf: 'stretch', backgroundColor: BrandColors.border }} />
+        {GROUP_AVERAGES.map((g) => {
+          const avg = summary.averageMetricDays(g.selector);
+          return (
+            <div key={g.label} style={{ minWidth: 96 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: g.color, flexShrink: 0 }} />
+                <span style={{ fontSize: 12, color: '#64748B', fontWeight: 600 }}>{g.label}</span>
+              </div>
+              <div style={{ height: 4 }} />
+              <div style={{ fontSize: 20, fontWeight: 'bold' }}>{avg != null ? `${avg.toFixed(1)}d` : '—'}</div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ height: 20 }} />
+      <div style={{ height: 1, backgroundColor: BrandColors.border }} />
+      <div style={{ height: 16 }} />
       {rows.length === 0 ? (
         <span style={{ fontSize: 13, color: '#64748B' }}>Sem itens concluídos nesse período.</span>
       ) : (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'center' }}>
-          <div style={{ minWidth: 96 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: BrandColors.total, flexShrink: 0 }} />
-              <span style={{ fontSize: 12, color: '#64748B', fontWeight: 600 }}>Total (Backlog → Concluído)</span>
-            </div>
-            <div style={{ height: 4 }} />
-            <div style={{ fontSize: 22, fontWeight: 'bold', color: BrandColors.total }}>{avgTotal != null ? `${avgTotal.toFixed(1)}d` : '—'}</div>
-          </div>
-          <div style={{ width: 1, alignSelf: 'stretch', backgroundColor: BrandColors.border }} />
           {rows.map((r, i) => (
             <div key={r.column} style={{ minWidth: 96 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -1097,6 +1177,170 @@ function ColumnAverageCard({ summary, personName }: { summary: MetricsSummary; p
  * spent sitting in queue before it was moved elsewhere. Only shown when
  * looking at settings.myDisplayName — for anyone else there's no tag
  * mechanism in play, and there's no separate "which mode am I in" anymore. */
+function StarPicker({ value, onChange, size = 18 }: { value: number; onChange: (stars: number) => void; size?: number }) {
+  return (
+    <div style={{ display: 'flex', gap: 2 }}>
+      {[1, 2, 3, 4, 5].map((n) => (
+        <button
+          key={n}
+          onClick={() => onChange(n)}
+          title={`${n} estrela${n > 1 ? 's' : ''}`}
+          style={{ background: 'none', border: 'none', padding: 2, cursor: 'pointer', display: 'flex' }}
+        >
+          <Star size={size} strokeWidth={1.75} fill={n <= value ? '#F59E0B' : 'none'} color={n <= value ? '#F59E0B' : '#CBD5E1'} />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** One row per card this responsible completed in the selected sprint —
+ * lets them give it a 1-5 star rating + comment about how that specific
+ * ticket/requester went. Pre-fills from an existing rating (`ratings`) so
+ * editing an already-rated card just updates it (upsert on work_item_id).
+ * Local per-row draft state so typing a comment doesn't need a round trip
+ * per keystroke — only "Salvar" calls `onSaveRating`. Its own dialog rather
+ * than an inline card in the page flow — opened deliberately from the
+ * "Avaliar cards concluídos" button, not stumbled into while scrolling. */
+function RateCompletedCardsDialog({
+  metrics,
+  ratedBy,
+  ratings,
+  onSaveRating,
+  onClose,
+}: {
+  metrics: ItemMetric[];
+  ratedBy: string;
+  ratings: CardRating[];
+  onSaveRating: (init: {
+    workItemId: number;
+    ratedBy: string;
+    department: string;
+    requesterName: string;
+    itemTitle: string;
+    stars: number;
+    comment: string;
+  }) => Promise<void>;
+  onClose: () => void;
+}) {
+  const ratingByItemId = new Map(ratings.map((r) => [r.workItemId, r]));
+  const [drafts, setDrafts] = useState<Map<number, { stars: number; comment: string }>>(new Map());
+  const [savingId, setSavingId] = useState<number | null>(null);
+
+  function draftFor(m: ItemMetric): { stars: number; comment: string } {
+    const draft = drafts.get(m.item.id);
+    if (draft != null) return draft;
+    const existing = ratingByItemId.get(m.item.id);
+    return { stars: existing?.stars ?? 0, comment: existing?.comment ?? '' };
+  }
+  function updateDraft(id: number, patch: Partial<{ stars: number; comment: string }>) {
+    setDrafts((prev) => {
+      const next = new Map(prev);
+      next.set(id, { ...draftFor(metrics.find((m) => m.item.id === id)!), ...patch });
+      return next;
+    });
+  }
+  async function save(m: ItemMetric) {
+    const draft = draftFor(m);
+    if (draft.stars === 0) return;
+    setSavingId(m.item.id);
+    try {
+      await onSaveRating({
+        workItemId: m.item.id,
+        ratedBy,
+        department: m.item.department,
+        requesterName: m.item.requesterName,
+        itemTitle: m.item.title,
+        stars: draft.stars,
+        comment: draft.comment,
+      });
+    } finally {
+      setSavingId(null);
+    }
+  }
+
+  return (
+    <div
+      style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }}
+      onClick={onClose}
+    >
+      <div
+        style={{ backgroundColor: '#fff', borderRadius: 12, maxWidth: 640, width: '90%', maxHeight: '85vh', overflowY: 'auto', padding: 20 }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+          <div style={{ flex: 1, fontWeight: 'bold', fontSize: 16 }}>Avalie seus cards concluídos</div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}>
+            <X size={18} strokeWidth={2} />
+          </button>
+        </div>
+        <div style={{ height: 4 }} />
+        <div style={{ fontSize: 12, color: '#64748B' }}>
+          Uma nota de 1 a 5 estrelas + comentário sobre como foi atender cada chamado desta sprint — usuário confuso, escopo mudou, requisito
+          mal definido, etc.
+        </div>
+        <div style={{ height: 16 }} />
+        {metrics.length === 0 ? (
+          <span style={{ fontSize: 13, color: '#64748B' }}>Nenhum card concluído nesta sprint ainda.</span>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {metrics.map((m, idx) => {
+          const draft = draftFor(m);
+          const existing = ratingByItemId.get(m.item.id);
+          const dirty = existing == null || existing.stars !== draft.stars || existing.comment !== draft.comment;
+          return (
+            <div key={m.item.id} style={{ paddingTop: idx === 0 ? 0 : 12, borderTop: idx === 0 ? 'none' : `1px solid ${BrandColors.border}` }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 11.5, color: '#94A3B8', flexShrink: 0 }}>#{m.item.id}</span>
+                <span style={{ fontSize: 13, fontWeight: 600, color: '#334155' }}>{m.item.title}</span>
+                {m.item.requesterName.trim() !== '' && (
+                  <span style={{ fontSize: 11.5, color: '#94A3B8' }}>solicitante: {m.item.requesterName.trim()}</span>
+                )}
+              </div>
+              <div style={{ height: 6 }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <StarPicker value={draft.stars} onChange={(stars) => updateDraft(m.item.id, { stars })} />
+                <input
+                  value={draft.comment}
+                  onChange={(e) => updateDraft(m.item.id, { comment: e.target.value })}
+                  placeholder="Comentário (opcional)"
+                  style={{
+                    flex: '1 1 240px',
+                    minWidth: 180,
+                    padding: '6px 10px',
+                    borderRadius: 8,
+                    border: `1px solid ${BrandColors.border}`,
+                    fontSize: 13,
+                  }}
+                />
+                <button
+                  onClick={() => save(m)}
+                  disabled={draft.stars === 0 || !dirty || savingId === m.item.id}
+                  style={{
+                    padding: '6px 14px',
+                    borderRadius: 8,
+                    border: 'none',
+                    backgroundColor: draft.stars === 0 || !dirty ? BrandColors.tableHeader : BrandColors.primary,
+                    color: draft.stars === 0 || !dirty ? '#94A3B8' : '#FFFFFF',
+                    fontWeight: 600,
+                    fontSize: 12.5,
+                    cursor: draft.stars === 0 || !dirty || savingId === m.item.id ? 'default' : 'pointer',
+                    flexShrink: 0,
+                  }}
+                >
+                  {savingId === m.item.id ? 'Salvando...' : existing != null ? 'Atualizar' : 'Salvar'}
+                </button>
+              </div>
+            </div>
+          );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TaggedQueueSection({
   selectedSpecificPerson,
   settings,
