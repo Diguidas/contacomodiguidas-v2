@@ -1,5 +1,5 @@
-import type { ReactNode } from 'react';
-import { AlertTriangle, Star, UserRound } from 'lucide-react';
+import { useState, type ReactNode } from 'react';
+import { AlertTriangle, Star, UserRound, X } from 'lucide-react';
 import { boardColumnMatches, WorkItem } from '../models/workItem';
 import { ItemMetric, MetricsCalculator } from '../services/metricsService';
 import { AppSettings } from '../services/settingsService';
@@ -42,13 +42,44 @@ function closedDateOf(item: WorkItem, doneStates: Set<string>, doneColumn: strin
   return item.firstDoneAfter(doneStates, null) ?? item.firstColumnAfter(new Set([doneColumn]), null);
 }
 
-interface DepartmentRow {
+interface DeptGroup {
   department: string;
-  waitingCount: number;
-  waitingDays: number;
-  weAvg: number | null;
-  weCount: number;
-  waitingItems: ItemMetric[];
+  count: number;
+  days: number;
+  avgDays: number;
+  oldest: ItemMetric | null;
+  oldestSince: Date | null;
+  items: ItemMetric[];
+}
+
+/** Agrupa métricas por setor do solicitante, somando os dias de espera por
+ * usuário (m.userDays) de cada card — usado tanto para "concluídos" quanto
+ * para "aguardando", pior primeiro. O card mais antigo é o de maior
+ * userDays do grupo; "desde" é a primeira vez que ele entrou na coluna de
+ * usuário (pode ter reentrado depois, mas serve como referência). */
+function buildDeptGroups(userColumns: Set<string>, metrics: ItemMetric[]): DeptGroup[] {
+  const byDept = new Map<string, ItemMetric[]>();
+  for (const m of metrics) {
+    const dept = departmentOf(m);
+    if (!byDept.has(dept)) byDept.set(dept, []);
+    byDept.get(dept)!.push(m);
+  }
+  return [...byDept.entries()]
+    .map(([department, rawItems]) => {
+      const items = [...rawItems].sort((a, b) => b.userDays - a.userDays);
+      const days = items.reduce((s, m) => s + m.userDays, 0);
+      const oldest = items[0] ?? null;
+      return {
+        department,
+        count: items.length,
+        days,
+        avgDays: items.length === 0 ? 0 : days / items.length,
+        oldest,
+        oldestSince: oldest == null ? null : oldest.item.firstEnteredColumn(userColumns),
+        items,
+      };
+    })
+    .sort((a, b) => b.days - a.days);
 }
 
 /** Por setor do solicitante (WorkItem.department), na sprint selecionada:
@@ -81,6 +112,8 @@ export function UsersScreen({
   ratings: CardRating[];
   ratingsLoading: boolean;
 }) {
+  const [modalGroup, setModalGroup] = useState<{ title: string; group: DeptGroup } | null>(null);
+
   if (!settings.isConfigured) {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
@@ -123,12 +156,15 @@ export function UsersScreen({
     (m) => !doneAsOf(m, cutoff) && boardColumnMatches(settings.userColumnSet, m.item.boardColumnAsOf(cutoff)),
   );
 
-  const byDept = new Map<string, ItemMetric[]>();
-  for (const m of waitingOnUser) {
-    const dept = departmentOf(m);
-    if (!byDept.has(dept)) byDept.set(dept, []);
-    byDept.get(dept)!.push(m);
-  }
+  // Concluídos dentro da janela e que passaram pela coluna de usuário em
+  // algum momento (m.userDays > 0) — cards fechados sem nunca esperar
+  // usuário não interessam aqui. No "Tudo" olha tudo que já fechou; numa
+  // sprint específica, só o que fechou dentro dela (endedInSprintLocal já
+  // exige m.done).
+  const doneMetrics = metrics.filter((m) => (selectedSprint == null ? m.done : endedInSprintLocal(m, selectedSprint)) && m.userDays > 0);
+
+  const doneGroups = buildDeptGroups(settings.userColumnSet, doneMetrics);
+  const waitingGroups = buildDeptGroups(settings.userColumnSet, waitingOnUser);
 
   // A rating only belongs to a sprint via its card's actual closed date —
   // card_ratings itself carries no date for that. If the rated card isn't
@@ -152,20 +188,13 @@ export function UsersScreen({
     ratingsByDept.get(dept)!.push(r);
   }
 
-  const allDepartments = new Set<string>([...byDept.keys(), ...ratingsByDept.keys()]);
-  const rows: DepartmentRow[] = [...allDepartments].map((department) => {
-    const waitingItems = byDept.get(department) ?? [];
-    const departmentRatings = ratingsByDept.get(department) ?? [];
-    return {
+  const ratingRows = [...ratingsByDept.entries()]
+    .map(([department, departmentRatings]) => ({
       department,
-      waitingCount: waitingItems.length,
-      waitingDays: waitingItems.reduce((s, m) => s + m.userDays, 0),
-      weAvg: departmentRatings.length === 0 ? null : departmentRatings.reduce((s, r) => s + r.stars, 0) / departmentRatings.length,
+      weAvg: departmentRatings.reduce((s, r) => s + r.stars, 0) / departmentRatings.length,
       weCount: departmentRatings.length,
-      waitingItems,
-    };
-  });
-  rows.sort((a, b) => b.waitingDays - a.waitingDays);
+    }))
+    .sort((a, b) => b.weCount - a.weCount);
 
   return (
     <div style={{ padding: 16, display: 'flex', justifyContent: 'center' }}>
@@ -200,9 +229,32 @@ export function UsersScreen({
         {loading && <div style={{ color: '#64748B', fontSize: 13 }}>Carregando itens...</div>}
         {error && <div style={{ color: BrandColors.danger, fontSize: 13 }}>{error}</div>}
 
-        {rows.length === 0 && !loading ? (
+        <SectionTitle>Concluídos na sprint</SectionTitle>
+        <DeptGroupTable
+          groups={doneGroups}
+          countLabel="Cards concluídos"
+          daysLabel="Dias que esperaram o usuário"
+          emptyLabel="Nenhum card concluído nessa janela."
+          onSelect={(group) => setModalGroup({ title: `Concluídos — ${group.department}`, group })}
+        />
+
+        <div style={{ height: 28 }} />
+
+        <SectionTitle>Aguardando usuário</SectionTitle>
+        <DeptGroupTable
+          groups={waitingGroups}
+          countLabel="Cards esperando usuário"
+          daysLabel="Dias acumulados de espera"
+          emptyLabel="Nenhum setor com card esperando usuário."
+          onSelect={(group) => setModalGroup({ title: `Aguardando usuário — ${group.department}`, group })}
+        />
+
+        <div style={{ height: 28 }} />
+
+        <SectionTitle>Avaliações que demos, por setor</SectionTitle>
+        {ratingRows.length === 0 ? (
           <div style={cardStyle()}>
-            <span style={{ color: '#64748B', fontSize: 13 }}>Nenhum setor com dado ainda.</span>
+            <span style={{ color: '#64748B', fontSize: 13 }}>{ratingsLoading ? 'Carregando avaliações...' : 'Nenhuma avaliação nessa janela.'}</span>
           </div>
         ) : (
           <TableCard>
@@ -210,14 +262,11 @@ export function UsersScreen({
               <thead>
                 <tr>
                   <Th>Setor</Th>
-                  <Th>Cards esperando usuário</Th>
-                  <Th>Dias acumulados de espera</Th>
                   <Th>Avaliação que demos</Th>
-                  <Th>Avaliação recebida</Th>
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => (
+                {ratingRows.map((r) => (
                   <tr key={r.department}>
                     <Td>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -225,40 +274,155 @@ export function UsersScreen({
                         <span style={{ fontWeight: 600 }}>{r.department}</span>
                       </div>
                     </Td>
-                    <Td>{r.waitingCount}</Td>
                     <Td>
-                      {r.waitingCount === 0 ? (
-                        <span style={{ color: '#CBD5E1' }}>—</span>
-                      ) : (
-                        <span
-                          style={{
-                            fontWeight: 700,
-                            color: r.waitingDays >= 30 ? BrandColors.danger : r.waitingDays >= 10 ? BrandColors.warning : '#334155',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 6,
-                          }}
-                        >
-                          {r.waitingDays >= 30 && <AlertTriangle size={13} strokeWidth={2} />}
-                          {r.waitingDays.toFixed(0)}d
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <StarsInline stars={Math.round(r.weAvg)} />
+                        <span style={{ fontSize: 12, color: '#64748B' }}>
+                          {r.weAvg.toFixed(1)} ({r.weCount})
                         </span>
-                      )}
+                      </div>
                     </Td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TableCard>
+        )}
+      </div>
+
+      {modalGroup && <DeptGroupModal title={modalGroup.title} group={modalGroup.group} onClose={() => setModalGroup(null)} />}
+    </div>
+  );
+}
+
+function SectionTitle({ children }: { children: ReactNode }) {
+  return <div style={{ fontSize: 14, fontWeight: 700, color: '#334155', marginBottom: 8 }}>{children}</div>;
+}
+
+function formatDate(d: Date | null): string {
+  if (d == null) return '—';
+  return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' });
+}
+
+/** Tabela por setor com uma linha-resumo clicável; o clique abre o modal
+ * com a lista de cards daquele setor (DeptGroupModal). */
+function DeptGroupTable({
+  groups,
+  countLabel,
+  daysLabel,
+  emptyLabel,
+  onSelect,
+}: {
+  groups: DeptGroup[];
+  countLabel: string;
+  daysLabel: string;
+  emptyLabel: string;
+  onSelect: (group: DeptGroup) => void;
+}) {
+  if (groups.length === 0) {
+    return (
+      <div style={cardStyle()}>
+        <span style={{ color: '#64748B', fontSize: 13 }}>{emptyLabel}</span>
+      </div>
+    );
+  }
+  return (
+    <TableCard>
+      <table style={tableStyle()}>
+        <thead>
+          <tr>
+            <Th>Setor</Th>
+            <Th>{countLabel}</Th>
+            <Th>{daysLabel}</Th>
+            <Th>Média por card</Th>
+            <Th>Mais antigo esperando</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {groups.map((g) => (
+            <tr key={g.department} onClick={() => onSelect(g)} style={{ cursor: 'pointer' }}>
+              <Td>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <UserRound size={14} strokeWidth={2} color="#94A3B8" />
+                  <span style={{ fontWeight: 600 }}>{g.department}</span>
+                </div>
+              </Td>
+              <Td>{g.count}</Td>
+              <Td>
+                {g.count === 0 ? (
+                  <span style={{ color: '#CBD5E1' }}>—</span>
+                ) : (
+                  <span
+                    style={{
+                      fontWeight: 700,
+                      color: g.days >= 30 ? BrandColors.danger : g.days >= 10 ? BrandColors.warning : '#334155',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                    }}
+                  >
+                    {g.days >= 30 && <AlertTriangle size={13} strokeWidth={2} />}
+                    {g.days.toFixed(0)}d
+                  </span>
+                )}
+              </Td>
+              <Td>{g.count === 0 ? <span style={{ color: '#CBD5E1' }}>—</span> : `${g.avgDays.toFixed(1)}d`}</Td>
+              <Td>
+                {g.oldest == null ? (
+                  <span style={{ color: '#CBD5E1' }}>—</span>
+                ) : (
+                  <span>
+                    #{g.oldest.item.id} · {g.oldest.userDays.toFixed(0)}d{g.oldestSince != null && ` (desde ${formatDate(g.oldestSince)})`}
+                  </span>
+                )}
+              </Td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </TableCard>
+  );
+}
+
+/** Modal com a lista de cards de um setor — responsável e dias que cada
+ * card esperou usuário, pior primeiro (mesma ordenação do grupo). */
+function DeptGroupModal({ title, group, onClose }: { title: string; group: DeptGroup; onClose: () => void }) {
+  return (
+    <div
+      style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }}
+      onClick={onClose}
+    >
+      <div
+        style={{ backgroundColor: '#fff', borderRadius: 12, maxWidth: 760, width: '90%', maxHeight: '85vh', overflowY: 'auto', padding: 20 }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <span style={{ flex: 1, fontWeight: 'bold', fontSize: 16 }}>{title}</span>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}>
+            <X size={18} strokeWidth={2} />
+          </button>
+        </div>
+        <div style={{ height: 12 }} />
+        {group.items.length === 0 ? (
+          <span style={{ color: '#64748B', fontSize: 13 }}>Nenhum card.</span>
+        ) : (
+          <TableCard>
+            <table style={tableStyle()}>
+              <thead>
+                <tr>
+                  <Th>Card</Th>
+                  <Th>Responsável</Th>
+                  <Th>Dias esperando usuário</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {group.items.map((m) => (
+                  <tr key={m.item.id}>
                     <Td>
-                      {r.weAvg == null ? (
-                        <span style={{ color: '#CBD5E1' }}>—</span>
-                      ) : (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <StarsInline stars={Math.round(r.weAvg)} />
-                          <span style={{ fontSize: 12, color: '#64748B' }}>
-                            {r.weAvg.toFixed(1)} ({r.weCount})
-                          </span>
-                        </div>
-                      )}
+                      <span style={{ fontWeight: 500 }}>#{m.item.id}</span> {m.item.title}
                     </Td>
-                    <Td>
-                      <span style={{ color: '#CBD5E1' }}>{ratingsLoading ? '...' : '— (sem dado ainda)'}</span>
-                    </Td>
+                    <Td>{m.item.assignedTo.trim() === '' ? 'Sem responsável' : m.item.assignedTo}</Td>
+                    <Td>{m.userDays.toFixed(0)}d</Td>
                   </tr>
                 ))}
               </tbody>
