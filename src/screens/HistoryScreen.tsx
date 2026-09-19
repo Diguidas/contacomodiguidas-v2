@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
-import { ArrowDown, ArrowUp, Minus, RefreshCw } from 'lucide-react';
+import { ArrowDown, ArrowUp, Minus, RefreshCw, X } from 'lucide-react';
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { ItemMetric } from '../services/metricsService';
 import { WorkItem } from '../models/workItem';
@@ -570,6 +570,7 @@ function ResponsibleConversionCards({ closedBySprint, settings }: { closedBySpri
  * group cluttering the chart. */
 function ResponsibleCycleTimeCards({ closedBySprint, settings }: { closedBySprint: SprintClosed[]; settings: AppSettings }) {
   const [selected, setSelected] = useState<Set<string>>(new Set(defaultPerformanceGroupKeys));
+  const [drilldown, setDrilldown] = useState<{ name: string; label: string; metrics: ItemMetric[] } | null>(null);
 
   const names = new Set<string>();
   for (const { closed } of closedBySprint) {
@@ -629,6 +630,7 @@ function ResponsibleCycleTimeCards({ closedBySprint, settings }: { closedBySprin
             return row;
           });
           const totalClosed = mine.reduce((s, m) => s + m.closed.length, 0);
+          const closedByLabel = new Map(mine.map(({ sprint, closed }) => [`S${sprint.number}`, closed]));
 
           return (
             <div key={name} style={{ flex: '1 1 420px', backgroundColor: '#fff', border: `1px solid ${BrandColors.border}`, borderRadius: 12, padding: 16 }}>
@@ -646,7 +648,17 @@ function ResponsibleCycleTimeCards({ closedBySprint, settings }: { closedBySprin
                   <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94A3B8', fontSize: 12 }}>Sem itens concluídos nesse período.</div>
                 ) : (
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={data}>
+                    <LineChart
+                      data={data}
+                      style={{ cursor: 'pointer' }}
+                      onClick={(state) => {
+                        const label = typeof state?.activeLabel === 'string' ? state.activeLabel : undefined;
+                        if (!label) return;
+                        const metrics = closedByLabel.get(label);
+                        if (!metrics || metrics.length === 0) return;
+                        setDrilldown({ name, label, metrics });
+                      }}
+                    >
                       <CartesianGrid strokeDasharray="3 3" vertical={false} />
                       <XAxis dataKey="label" tick={{ fontSize: 10 }} />
                       <YAxis tick={{ fontSize: 10 }} width={30} />
@@ -656,11 +668,107 @@ function ResponsibleCycleTimeCards({ closedBySprint, settings }: { closedBySprin
                   </ResponsiveContainer>
                 )}
               </div>
+              {totalClosed > 0 && selected.size > 0 && (
+                <div style={{ fontSize: 11, color: '#B0B9C6', textAlign: 'center', marginTop: 2 }}>Clique num ponto pra ver os itens por trás do número</div>
+              )}
             </div>
           );
         })}
       </div>
+      {drilldown && (
+        <CycleTimeDrilldownDialog
+          name={drilldown.name}
+          label={drilldown.label}
+          metrics={drilldown.metrics}
+          selected={selected}
+          onClose={() => setDrilldown(null)}
+        />
+      )}
     </div>
+  );
+}
+
+function formatDate(d: Date): string {
+  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+}
+
+function Modal({ title, width, onClose, children }: { title: string; width: number; onClose: () => void; children: ReactNode }) {
+  return (
+    <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }} onClick={onClose}>
+      <div style={{ backgroundColor: '#fff', borderRadius: 12, maxWidth: width, width: '90%', maxHeight: '85vh', overflowY: 'auto', padding: 20 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <span style={{ flex: 1, fontWeight: 'bold', fontSize: 16 }}>{title}</span>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}>
+            <X size={18} strokeWidth={2} />
+          </button>
+        </div>
+        <div style={{ height: 12 }} />
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** Opens when a point on a ResponsibleCycleTimeCards line is clicked — the
+ * exact items behind that sprint's total, one column per selected group and
+ * a Total column, sorted worst-first so an outlier that dragged the average
+ * up (small-N sprints are very sensitive to this) jumps out immediately. */
+function CycleTimeDrilldownDialog({
+  name,
+  label,
+  metrics,
+  selected,
+  onClose,
+}: {
+  name: string;
+  label: string;
+  metrics: ItemMetric[];
+  selected: Set<string>;
+  onClose: () => void;
+}) {
+  const groups = performanceGroups.filter((g) => selected.has(g.key));
+  const rows = [...metrics]
+    .map((m) => ({ m, total: groups.reduce((s, g) => s + GROUP_VALUE_OF[g.key](m), 0) }))
+    .sort((a, b) => b.total - a.total);
+  const totalDays = rows.reduce((s, r) => s + r.total, 0);
+  const avgDays = rows.length === 0 ? 0 : totalDays / rows.length;
+
+  return (
+    <Modal title={`${name} — ${label}`} width={760} onClose={onClose}>
+      <div style={{ fontSize: 12.5, color: '#64748B', marginBottom: 10 }}>
+        {rows.length} {rows.length === 1 ? 'item concluído' : 'itens concluídos'} — média de {avgDays.toFixed(1)}d somando {groups.map((g) => g.label).join(', ')}.
+      </div>
+      <table style={tableStyle()}>
+        <thead>
+          <tr>
+            <Th>ID</Th>
+            <Th>Título</Th>
+            <Th>Criado em</Th>
+            {groups.map((g) => (
+              <Th key={g.key}>{g.label}</Th>
+            ))}
+            <Th>Total</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(({ m, total }) => (
+            <tr key={m.item.id}>
+              <Td>{m.item.id}</Td>
+              <Td>
+                <span style={{ display: 'inline-block', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.item.title}</span>
+              </Td>
+              <Td>{formatDate(m.item.createdDate)}</Td>
+              {groups.map((g) => (
+                <Td key={g.key}>{GROUP_VALUE_OF[g.key](m).toFixed(1)}d</Td>
+              ))}
+              <Td>
+                <span style={{ fontWeight: 700 }}>{total.toFixed(1)}d</span>
+              </Td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </Modal>
   );
 }
 
