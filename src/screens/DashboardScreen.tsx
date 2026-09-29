@@ -13,6 +13,7 @@ import {
 } from 'recharts';
 import { boardColumnMatches, WorkItem } from '../models/workItem';
 import {
+  formatDuration,
   groupBreakdown,
   ItemMetric,
   MetricsCalculator,
@@ -20,33 +21,25 @@ import {
 } from '../services/metricsService';
 import { AppSettings } from '../services/settingsService';
 import { Sprint, SprintService } from '../services/sprintService';
-import { buildHealthScoreRanking } from '../services/sprintSnapshotService';
-import { CardRating } from '../services/cardRatingService';
+import { sprintCutoff } from '../services/sprintSnapshotService';
 import { BrandColors } from '../theme';
 import { ToggleChip } from '../components/ToggleChip';
-import { Star } from 'lucide-react';
 import abapinhoLogo from '../assets/abapinho.png';
 import {
   AlertTriangle,
   ArrowLeftRight,
   ArrowRight,
-  BarChart3,
   Building2,
   Calendar,
   CheckCircle2,
   Clock,
   Eye,
   Flag,
-  HeartPulse,
-  Inbox,
   LayoutList,
   PauseCircle,
   RefreshCw,
   Search,
   Tag as TagIcon,
-  Truck,
-  TrendingUp,
-  UserRound,
   X,
   Zap,
 } from 'lucide-react';
@@ -69,6 +62,38 @@ export function predictabilityColor(pct: number | null | undefined): string {
   if (pct >= 80) return BrandColors.user;
   if (pct >= 50) return BrandColors.queue;
   return BrandColors.danger;
+}
+
+// Same "entrou, foi carregado, ou fechou dentro da janela" sprint scope
+// every other sprint-filtered screen uses — duplicated locally since these
+// aren't exported from sprintSnapshotService (TeamDashboardScreen and
+// UsersScreen each keep their own copy too).
+function createdInSprintLocal(item: WorkItem, sprint: Sprint | null): boolean {
+  if (sprint == null) return true;
+  const d = item.createdDate;
+  const rangeEnd = new Date(sprint.end.getTime() + 24 * 60 * 60 * 1000);
+  return d.getTime() >= sprint.start.getTime() && d.getTime() <= rangeEnd.getTime();
+}
+
+// Survives the browser reloading this tab (Chrome discarding a backgrounded
+// tab, same issue the items cache and AppShell's destination already work
+// around) — without this, coming back to the tab silently resets whoever
+// was selected back to settings.myDisplayName.
+const DASHBOARD_PERSON_STORAGE_KEY = 'dashboard:selectedPerson';
+function readStoredPerson(): string | null {
+  try {
+    return sessionStorage.getItem(DASHBOARD_PERSON_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+function storePerson(name: string | null): void {
+  try {
+    if (name == null) sessionStorage.removeItem(DASHBOARD_PERSON_STORAGE_KEY);
+    else sessionStorage.setItem(DASHBOARD_PERSON_STORAGE_KEY, name);
+  } catch {
+    // Ignore — losing this just means falling back to myDisplayName on reload.
+  }
 }
 
 type TypeFilter = 'cards' | 'features' | 'all';
@@ -185,8 +210,6 @@ export function DashboardScreen({
   onRefresh,
   onSprintChanged,
   lockedResponsible,
-  ratings,
-  onSaveRating,
 }: {
   settings: AppSettings;
   items: WorkItem[];
@@ -201,19 +224,8 @@ export function DashboardScreen({
   // disappears entirely and every filter is pinned to this name, so a
   // regular user can only ever see their own data, not just default to it.
   lockedResponsible?: string;
-  ratings: CardRating[];
-  onSaveRating: (init: {
-    workItemId: number;
-    ratedBy: string;
-    department: string;
-    requesterName: string;
-    itemTitle: string;
-    stars: number;
-    comment: string;
-  }) => Promise<void>;
 }) {
   const completedSectionRef = useRef<HTMLDivElement>(null);
-  const [showRateDialog, setShowRateDialog] = useState(false);
 
   // "Active" filters — what's actually applied to the data right now. The
   // "Responsável" dropdown is just a name: picking settings.myDisplayName
@@ -221,7 +233,9 @@ export function DashboardScreen({
   // itemsInSelectedGroup below, picking anyone else is a plain
   // assignedTo match — no separate "mode" toggle needed anymore.
   const [selectedType, setSelectedType] = useState<TypeFilter>('cards');
-  const [selectedSpecificPerson, setSelectedSpecificPerson] = useState<string | null>(lockedResponsible ?? settings.myDisplayName);
+  const [selectedSpecificPerson, setSelectedSpecificPerson] = useState<string | null>(
+    () => lockedResponsible ?? readStoredPerson() ?? settings.myDisplayName,
+  );
   const [selectedArea, setSelectedArea] = useState<string | null>(null);
 
   // "Pending" filters — what the dropdowns show while you're setting them
@@ -252,6 +266,7 @@ export function DashboardScreen({
   function applyPendingFilters() {
     setSelectedType(pendingType);
     setSelectedSpecificPerson(pendingSpecificPerson);
+    storePerson(pendingSpecificPerson);
     setSelectedArea(pendingArea);
     if (pendingSprint?.number !== selectedSprint?.number) {
       onSprintChanged(pendingSprint);
@@ -374,25 +389,48 @@ export function DashboardScreen({
 
   // A column value that means "disregard this item entirely" — some cards
   // come back with no board column at all (shown as "-" on the board).
-  function hasUsableColumn(item: WorkItem): boolean {
-    const col = item.currentBoardColumn.trim();
+  function hasUsableColumn(column: string): boolean {
+    const col = column.trim();
     return col !== '' && col !== '-';
   }
-  const isInTriage = (item: WorkItem) => boardColumnMatches(settings.triageColumnSet, item.currentBoardColumn);
+  // Whether `item` was still open as of `sprint`'s cutoff — existed by then
+  // (created in it or carried in from before it) and, per its real history,
+  // hadn't closed yet at that point. Uses `m.done`/`m.endDate` (the item's
+  // actual completion, whenever it happened) rather than asking "is it open
+  // *now*" — a card open during that sprint but concluded since (in a later
+  // sprint) still belongs to this snapshot; a card that existed but hadn't
+  // been created yet by the cutoff doesn't.
+  function openAsOfCutoff(m: ItemMetric, sprint: Sprint): boolean {
+    if (!(createdInSprintLocal(m.item, sprint) || m.item.createdDate.getTime() < sprint.start.getTime())) return false;
+    const cutoff = sprintCutoff(sprint);
+    return !(m.done && m.endDate != null && m.endDate.getTime() <= cutoff.getTime());
+  }
+
+  // Which column to judge Triagem-vs-not by: the live column when no sprint
+  // is selected (this section's normal "right now" meaning), or the column
+  // the card was actually sitting in as of that sprint's cutoff when one is
+  // — otherwise a card finished (or moved on) after that sprint closed would
+  // misrepresent where it stood back then.
+  const columnFor = (item: WorkItem) => (selectedSprint == null ? item.currentBoardColumn : item.boardColumnAsOf(sprintCutoff(selectedSprint)));
+  const isInTriage = (item: WorkItem) => boardColumnMatches(settings.triageColumnSet, columnFor(item));
 
   // Every open item in the selected group that's past Triagem and has a
   // real board column — no matter which column it's currently sitting in
-  // otherwise — always broken down by the same structure. Shown regardless
-  // of the sprint filter. Triagem items get their own section instead
+  // otherwise — always broken down by the same structure. Scoped to the
+  // selected sprint's own "aberto" snapshot when one is picked (drawn from
+  // every item, not just what's open *today*, since a card open back then
+  // may have since closed), same rule Visão do Time uses, instead of always
+  // showing live/current state. Triagem items get their own section instead
   // (triageItems), and items with no usable column are disregarded.
-  const agingItems = groupSummary.inProgress
-    .filter((m) => hasUsableColumn(m.item) && !isInTriage(m.item))
+  const openInSprint = selectedSprint == null ? groupSummary.inProgress : groupSummary.metrics.filter((m) => openAsOfCutoff(m, selectedSprint));
+  const agingItems = openInSprint
+    .filter((m) => hasUsableColumn(columnFor(m.item)) && !isInTriage(m.item))
     .sort((a, b) => b.totalDays - a.totalDays);
 
-  // Open items currently sitting in Triagem — shown separately so they
-  // don't inflate "Itens em aberto", with the time spent there specifically.
-  const triageItems = groupSummary.inProgress
-    .filter((m) => hasUsableColumn(m.item) && isInTriage(m.item))
+  // Open items sitting in Triagem — shown separately so they don't inflate
+  // "Itens em aberto", with the time spent there specifically.
+  const triageItems = openInSprint
+    .filter((m) => hasUsableColumn(columnFor(m.item)) && isInTriage(m.item))
     .sort((a, b) => b.triageDays - a.triageDays);
 
   const openedSprintNumber = (item: WorkItem) => sprintService.sprintNumberContaining(item.createdDate);
@@ -489,7 +527,6 @@ export function DashboardScreen({
           onSearch={applyPendingFilters}
         />
         <div style={{ height: 20 }} />
-        <HealthScoreBanner personName={selectedSpecificPerson} items={items} settings={settings} />
         <DetectedColumnsWarning settings={settings} detected={detectedBoardColumns} />
         <SummaryCards
           summary={summary}
@@ -528,32 +565,6 @@ export function DashboardScreen({
           categoryColorFor={categoryColorFor}
           onSelectItem={setDetailItem}
         />
-        {selectedSpecificPerson != null && (
-          <>
-            <div style={{ height: 20 }} />
-            <div style={{ display: 'flex', justifyContent: 'center' }}>
-              <button
-                onClick={() => setShowRateDialog(true)}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '10px 18px',
-                  borderRadius: 8,
-                  border: `1px solid ${BrandColors.primary}`,
-                  backgroundColor: BrandColors.primaryLightBg,
-                  color: BrandColors.primaryDark,
-                  fontWeight: 600,
-                  fontSize: 13,
-                  cursor: 'pointer',
-                }}
-              >
-                <Star size={15} strokeWidth={2} />
-                Avaliar cards concluídos desta sprint
-              </button>
-            </div>
-          </>
-        )}
         <div style={{ height: 16 }} />
         <Footer lastUpdated={lastUpdated} onRefresh={onRefresh} />
       </div>
@@ -564,15 +575,6 @@ export function DashboardScreen({
           openedSprintNumber={openedSprintNumber(detailItem.item)}
           timeInCurrentColumn={timeInCurrentColumnDays(detailItem.item)}
           onClose={() => setDetailItem(null)}
-        />
-      )}
-      {showRateDialog && selectedSpecificPerson != null && (
-        <RateCompletedCardsDialog
-          metrics={summary.metrics}
-          ratedBy={selectedSpecificPerson}
-          ratings={ratings}
-          onSaveRating={onSaveRating}
-          onClose={() => setShowRateDialog(false)}
         />
       )}
     </div>
@@ -790,55 +792,6 @@ function DetectedColumnsWarning({ settings, detected }: { settings: AppSettings;
   );
 }
 
-/** Surfaces where the person this screen is about stands in the whole
- * team's Health Score ranking (Visão do time) — without having to leave
- * this screen and go look it up there. */
-function HealthScoreBanner({
-  personName,
-  items,
-  settings,
-}: {
-  personName: string | null | undefined;
-  items: WorkItem[];
-  settings: AppSettings;
-}) {
-  const name = personName?.trim();
-  if (!name) return null;
-  const ranking = buildHealthScoreRanking({ items, settings });
-  const index = ranking.findIndex((r) => r.name.trim().toLowerCase() === name.toLowerCase());
-  if (index === -1) return null;
-  const entry = ranking[index];
-  const color = predictabilityColor(entry.score);
-  return (
-    <div style={{ marginBottom: 20 }}>
-      <div style={{ ...cardStyle(), display: 'flex', alignItems: 'center', gap: 14 }}>
-        <div
-          style={{
-            width: 48,
-            height: 48,
-            borderRadius: '50%',
-            backgroundColor: hexAlpha(color, 0.12),
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color,
-            flexShrink: 0,
-          }}
-        >
-          <HeartPulse size={20} strokeWidth={1.75} />
-        </div>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontWeight: 'bold' }}>Health Score de {name}</div>
-          <div style={{ fontSize: 12, color: '#64748B' }}>
-            Posição {index + 1} de {ranking.length} no time — veja o cruzamento completo em Visão do time.
-          </div>
-        </div>
-        <span style={{ fontSize: 26, fontWeight: 'bold', color }}>{entry.score.toFixed(0)}</span>
-      </div>
-    </div>
-  );
-}
-
 function hexAlpha(hex: string, alpha: number): string {
   const h = hex.replace('#', '');
   const r = parseInt(h.substring(0, 2), 16);
@@ -908,11 +861,8 @@ function SummaryCards({
   selectedCycleTimeCategories: Set<CycleTimeCategory>;
   onToggleCycleTimeCategory: (c: CycleTimeCategory) => void;
 }) {
-  const avgAging = aging.length === 0 ? null : aging.reduce((s, m) => s + m.totalDays, 0) / aging.length;
   const selector = (m: ItemMetric) => cycleTimeSelectMulti(selectedCycleTimeCategories, m);
   const avgCycleTime = summary.averageMetricDays(selector);
-  const medianCycleTime = summary.medianMetricDays(selector);
-  const p85CycleTime = summary.percentileMetricDays(selector, 85);
 
   const cycleTimeCards = [
     <StatCard
@@ -923,15 +873,6 @@ function SummaryCards({
       icon={<Clock size={18} strokeWidth={1.75} />}
       color={cycleTimeCombinedColor(selectedCycleTimeCategories)}
     />,
-    <StatCard
-      key="median"
-      title="Cycle Time (mediana)"
-      subtitle="Mediana geral dos itens"
-      value={medianCycleTime != null ? `${medianCycleTime.toFixed(1)} dias` : '—'}
-      icon={<TrendingUp size={18} strokeWidth={1.75} />}
-      color={BrandColors.total}
-    />,
-    <StatCard key="p85" title="P85" subtitle="Percentil 85" value={`${p85CycleTime.toFixed(1)} dias`} icon={<BarChart3 size={18} strokeWidth={1.75} />} color={BrandColors.general} />,
   ];
 
   const volumeCards = [
@@ -943,54 +884,6 @@ function SummaryCards({
       value={`${summary.completed.length}`}
       icon={<CheckCircle2 size={18} strokeWidth={1.75} />}
       color={BrandColors.user}
-    />,
-    <StatCard
-      key="avgOpen"
-      title="Tempo total médio (aberto)"
-      subtitle="Itens ainda em andamento"
-      value={avgAging != null ? `${avgAging.toFixed(1)} dias` : '—'}
-      icon={<Clock size={18} strokeWidth={1.75} />}
-      color={BrandColors.total}
-    />,
-    <StatCard
-      key="avgTotal"
-      title="Total médio (Backlog → Concluído)"
-      subtitle="Tempo total médio"
-      value={summary.averageTotalDays != null ? `${summary.averageTotalDays.toFixed(1)} dias` : '—'}
-      icon="∞"
-      color={BrandColors.total}
-    />,
-    <StatCard
-      key="triage"
-      title="Triagem médio"
-      subtitle="Tempo médio em triagem"
-      value={summary.averageTriageDays != null ? `${summary.averageTriageDays.toFixed(1)} dias` : '—'}
-      icon={<Search size={18} strokeWidth={1.75} />}
-      color={BrandColors.triage}
-    />,
-    <StatCard
-      key="queue"
-      title="Fila (Liberado p/ Dev) médio"
-      subtitle="Tempo médio na fila"
-      value={summary.averageQueueDays != null ? `${summary.averageQueueDays.toFixed(1)} dias` : '—'}
-      icon={<Inbox size={18} strokeWidth={1.75} />}
-      color={BrandColors.queue}
-    />,
-    <StatCard
-      key="user"
-      title="Aguardando usuário (médio)"
-      subtitle="Tempo médio aguardando"
-      value={summary.averageUserDays != null ? `${summary.averageUserDays.toFixed(1)} dias` : '—'}
-      icon={<UserRound size={18} strokeWidth={1.75} />}
-      color={BrandColors.user}
-    />,
-    <StatCard
-      key="vendor"
-      title="Aguardando fornecedor (médio)"
-      subtitle="Tempo médio aguardando"
-      value={summary.averageVendorDays != null ? `${summary.averageVendorDays.toFixed(1)} dias` : '—'}
-      icon={<Truck size={18} strokeWidth={1.75} />}
-      color={BrandColors.vendor}
     />,
   ];
 
@@ -1051,7 +944,7 @@ function SummaryCards({
           </div>
         }
       />
-      <StatGroup label="Volume & tempo por etapa" cards={volumeCards} />
+      <StatGroup label="Entrega" cards={volumeCards} />
       <StatGroup label="Qualidade & prazo" cards={qualityCards} />
     </div>
   );
@@ -1173,174 +1066,6 @@ function ColumnAverageCard({ summary, personName }: { summary: MetricsSummary; p
   );
 }
 
-/** "Quanto tempo ele demora pra agir": average/median days a tagged item
- * spent sitting in queue before it was moved elsewhere. Only shown when
- * looking at settings.myDisplayName — for anyone else there's no tag
- * mechanism in play, and there's no separate "which mode am I in" anymore. */
-function StarPicker({ value, onChange, size = 18 }: { value: number; onChange: (stars: number) => void; size?: number }) {
-  return (
-    <div style={{ display: 'flex', gap: 2 }}>
-      {[1, 2, 3, 4, 5].map((n) => (
-        <button
-          key={n}
-          onClick={() => onChange(n)}
-          title={`${n} estrela${n > 1 ? 's' : ''}`}
-          style={{ background: 'none', border: 'none', padding: 2, cursor: 'pointer', display: 'flex' }}
-        >
-          <Star size={size} strokeWidth={1.75} fill={n <= value ? '#F59E0B' : 'none'} color={n <= value ? '#F59E0B' : '#CBD5E1'} />
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/** One row per card this responsible completed in the selected sprint —
- * lets them give it a 1-5 star rating + comment about how that specific
- * ticket/requester went. Pre-fills from an existing rating (`ratings`) so
- * editing an already-rated card just updates it (upsert on work_item_id).
- * Local per-row draft state so typing a comment doesn't need a round trip
- * per keystroke — only "Salvar" calls `onSaveRating`. Its own dialog rather
- * than an inline card in the page flow — opened deliberately from the
- * "Avaliar cards concluídos" button, not stumbled into while scrolling. */
-function RateCompletedCardsDialog({
-  metrics,
-  ratedBy,
-  ratings,
-  onSaveRating,
-  onClose,
-}: {
-  metrics: ItemMetric[];
-  ratedBy: string;
-  ratings: CardRating[];
-  onSaveRating: (init: {
-    workItemId: number;
-    ratedBy: string;
-    department: string;
-    requesterName: string;
-    itemTitle: string;
-    stars: number;
-    comment: string;
-  }) => Promise<void>;
-  onClose: () => void;
-}) {
-  const ratingByItemId = new Map(ratings.map((r) => [r.workItemId, r]));
-  const [drafts, setDrafts] = useState<Map<number, { stars: number; comment: string }>>(new Map());
-  const [savingId, setSavingId] = useState<number | null>(null);
-
-  function draftFor(m: ItemMetric): { stars: number; comment: string } {
-    const draft = drafts.get(m.item.id);
-    if (draft != null) return draft;
-    const existing = ratingByItemId.get(m.item.id);
-    return { stars: existing?.stars ?? 0, comment: existing?.comment ?? '' };
-  }
-  function updateDraft(id: number, patch: Partial<{ stars: number; comment: string }>) {
-    setDrafts((prev) => {
-      const next = new Map(prev);
-      next.set(id, { ...draftFor(metrics.find((m) => m.item.id === id)!), ...patch });
-      return next;
-    });
-  }
-  async function save(m: ItemMetric) {
-    const draft = draftFor(m);
-    if (draft.stars === 0) return;
-    setSavingId(m.item.id);
-    try {
-      await onSaveRating({
-        workItemId: m.item.id,
-        ratedBy,
-        department: m.item.department,
-        requesterName: m.item.requesterName,
-        itemTitle: m.item.title,
-        stars: draft.stars,
-        comment: draft.comment,
-      });
-    } finally {
-      setSavingId(null);
-    }
-  }
-
-  return (
-    <div
-      style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }}
-      onClick={onClose}
-    >
-      <div
-        style={{ backgroundColor: '#fff', borderRadius: 12, maxWidth: 640, width: '90%', maxHeight: '85vh', overflowY: 'auto', padding: 20 }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div style={{ display: 'flex', alignItems: 'flex-start' }}>
-          <div style={{ flex: 1, fontWeight: 'bold', fontSize: 16 }}>Avalie seus cards concluídos</div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}>
-            <X size={18} strokeWidth={2} />
-          </button>
-        </div>
-        <div style={{ height: 4 }} />
-        <div style={{ fontSize: 12, color: '#64748B' }}>
-          Uma nota de 1 a 5 estrelas + comentário sobre como foi atender cada chamado desta sprint — usuário confuso, escopo mudou, requisito
-          mal definido, etc.
-        </div>
-        <div style={{ height: 16 }} />
-        {metrics.length === 0 ? (
-          <span style={{ fontSize: 13, color: '#64748B' }}>Nenhum card concluído nesta sprint ainda.</span>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {metrics.map((m, idx) => {
-          const draft = draftFor(m);
-          const existing = ratingByItemId.get(m.item.id);
-          const dirty = existing == null || existing.stars !== draft.stars || existing.comment !== draft.comment;
-          return (
-            <div key={m.item.id} style={{ paddingTop: idx === 0 ? 0 : 12, borderTop: idx === 0 ? 'none' : `1px solid ${BrandColors.border}` }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                <span style={{ fontSize: 11.5, color: '#94A3B8', flexShrink: 0 }}>#{m.item.id}</span>
-                <span style={{ fontSize: 13, fontWeight: 600, color: '#334155' }}>{m.item.title}</span>
-                {m.item.requesterName.trim() !== '' && (
-                  <span style={{ fontSize: 11.5, color: '#94A3B8' }}>solicitante: {m.item.requesterName.trim()}</span>
-                )}
-              </div>
-              <div style={{ height: 6 }} />
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                <StarPicker value={draft.stars} onChange={(stars) => updateDraft(m.item.id, { stars })} />
-                <input
-                  value={draft.comment}
-                  onChange={(e) => updateDraft(m.item.id, { comment: e.target.value })}
-                  placeholder="Comentário (opcional)"
-                  style={{
-                    flex: '1 1 240px',
-                    minWidth: 180,
-                    padding: '6px 10px',
-                    borderRadius: 8,
-                    border: `1px solid ${BrandColors.border}`,
-                    fontSize: 13,
-                  }}
-                />
-                <button
-                  onClick={() => save(m)}
-                  disabled={draft.stars === 0 || !dirty || savingId === m.item.id}
-                  style={{
-                    padding: '6px 14px',
-                    borderRadius: 8,
-                    border: 'none',
-                    backgroundColor: draft.stars === 0 || !dirty ? BrandColors.tableHeader : BrandColors.primary,
-                    color: draft.stars === 0 || !dirty ? '#94A3B8' : '#FFFFFF',
-                    fontWeight: 600,
-                    fontSize: 12.5,
-                    cursor: draft.stars === 0 || !dirty || savingId === m.item.id ? 'default' : 'pointer',
-                    flexShrink: 0,
-                  }}
-                >
-                  {savingId === m.item.id ? 'Salvando...' : existing != null ? 'Atualizar' : 'Salvar'}
-                </button>
-              </div>
-            </div>
-          );
-            })}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function TaggedQueueSection({
   selectedSpecificPerson,
   settings,
@@ -1359,11 +1084,8 @@ function TaggedQueueSection({
   const days = pickups.map((m) => m.queueDays).sort((a, b) => a - b);
 
   let avg: number | null = null;
-  let median: number | null = null;
   if (days.length > 0) {
     avg = days.reduce((a, b) => a + b, 0) / days.length;
-    const mid = Math.floor(days.length / 2);
-    median = days.length % 2 === 0 ? (days[mid - 1] + days[mid]) / 2 : days[mid];
   }
 
   const countLabel = `${pickups.length} ${pickups.length === 1 ? 'item saiu' : 'itens saíram'} da fila`;
@@ -1374,14 +1096,6 @@ function TaggedQueueSection({
       subtitle={countLabel}
       value={avg != null ? `${avg.toFixed(1)} dias` : '—'}
       icon={<PauseCircle size={18} strokeWidth={1.75} />}
-      color={BrandColors.queue}
-    />,
-    <StatCard
-      key="median"
-      title="Mediana"
-      subtitle="Menos sensível a itens fora da curva"
-      value={median != null ? `${median.toFixed(1)} dias` : '—'}
-      icon={<TrendingUp size={18} strokeWidth={1.75} />}
       color={BrandColors.queue}
     />,
   ];
@@ -1806,8 +1520,9 @@ function AgingSection({
       </div>
       <div style={{ height: 4 }} />
       <div style={{ fontSize: 12, color: '#64748B' }}>
-        Fora da Triagem, em qualquer outra coluna, do mais antigo para o mais novo — mostrado sempre, independente da sprint selecionada. Itens
-        em Triagem aparecem na seção própria abaixo. Clique num item para ver o tempo por agrupamento.
+        Fora da Triagem, em qualquer outra coluna, do mais antigo para o mais novo — com sprint selecionada, mostra o retrato de como estava no
+        fim dela; sem sprint selecionada, mostra o estado atual. Itens em Triagem aparecem na seção própria abaixo. Clique num item para ver o
+        tempo por agrupamento.
       </div>
       <div style={{ height: 12 }} />
       {aging.length === 0 ? <span>Nenhum item em aberto no momento.</span> : <SimpleTable items={visible} showFim={false} categoryColorFor={categoryColorFor} onSelectItem={onSelectItem} />}
@@ -1884,7 +1599,7 @@ function TriageSection({
                       </Td>
                       <Td>{formatDate(m.item.createdDate)}</Td>
                       <Td numeric>
-                        <span style={{ fontWeight: 'bold', color: BrandColors.triage }}>{m.triageDays.toFixed(1)} dias</span>
+                        <span style={{ fontWeight: 'bold', color: BrandColors.triage }}>{formatDuration(m.triageDays)}</span>
                       </Td>
                     </tr>
                   ))}
@@ -1962,7 +1677,7 @@ function SimpleTable({
                 <Td>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 4, maxWidth: 260 }}>
                     {m.isSuspicious && (
-                      <span title={m.isSuspiciouslyFast ? 'Resolvido em menos de 4h — pode ser legítimo (chamado simples) ou fechado sem trabalho real' : 'Boa parte do tempo desse item não está em nenhuma coluna rastreada'} style={{ color: BrandColors.danger, display: 'flex' }}>
+                      <span title={m.isSuspiciouslyFast ? 'Resolvido em menos de 1h — pode ser legítimo (chamado simples) ou fechado sem trabalho real' : 'Boa parte do tempo desse item não está em nenhuma coluna rastreada'} style={{ color: BrandColors.danger, display: 'flex' }}>
                         <Eye size={13} strokeWidth={2} />
                       </span>
                     )}
@@ -1977,7 +1692,7 @@ function SimpleTable({
                 </Td>
                 <Td>{formatDate(m.item.createdDate)}</Td>
                 <Td>{m.startDate != null ? formatDate(m.startDate) : '—'}</Td>
-                {showFim && <Td>{m.endDate != null ? formatDate(m.endDate) : '—'}</Td>}
+                {showFim && <Td>{m.endDate != null ? formatDateTime(m.endDate) : '—'}</Td>}
                 {showFim && (
                   <Td>
                     {m.isOnTime == null ? (
@@ -2067,7 +1782,7 @@ function ItemDetailDialog({
   chips.push(
     <InfoChip key="flow" label="Eficiência de fluxo" value={`${metric.flowEfficiencyPercent.toFixed(1)}%`} color={flowEfficiencyColor(metric.flowEfficiencyPercent)} />,
   );
-  if (metric.isSuspiciouslyFast) chips.push(<InfoChip key="fast" label="Atenção" value="Resolvido em <4h" color={BrandColors.danger} />);
+  if (metric.isSuspiciouslyFast) chips.push(<InfoChip key="fast" label="Atenção" value="Resolvido em <1h" color={BrandColors.danger} />);
   if (metric.hasUntrackedGap)
     chips.push(<InfoChip key="gap" label="Atenção" value={`${metric.untrackedGapPercent.toFixed(0)}% do tempo sem rastro`} color={BrandColors.danger} />);
 
@@ -2099,7 +1814,7 @@ function ItemDetailDialog({
         <div style={{ height: 4 }} />
         <div style={{ fontSize: 12, color: '#64748B' }}>
           Criado em: {formatDate(item.createdDate)} • Aberto na sprint {openedSprintNumber} • Início dev:{' '}
-          {metric.startDate != null ? formatDate(metric.startDate) : '—'} • Fim: {metric.endDate != null ? formatDate(metric.endDate) : 'em aberto'}
+          {metric.startDate != null ? formatDate(metric.startDate) : '—'} • Fim: {metric.endDate != null ? formatDateTime(metric.endDate) : 'em aberto'}
         </div>
         <div style={{ height: 16 }} />
         {chips.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>{chips}</div>}
@@ -2111,7 +1826,7 @@ function ItemDetailDialog({
             <div style={{ width: 10, height: 10, borderRadius: '50%', backgroundColor: r.color }} />
             <div style={{ width: 10 }} />
             <span style={{ flex: 1, fontSize: 13 }}>{r.label}</span>
-            <span style={{ fontWeight: 'bold', color: r.color, fontSize: 13 }}>{r.value.toFixed(1)} dias</span>
+            <span style={{ fontWeight: 'bold', color: r.color, fontSize: 13 }}>{formatDuration(r.value)}</span>
           </div>
         ))}
       </div>

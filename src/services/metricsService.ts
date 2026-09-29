@@ -2,6 +2,18 @@ import { WorkItem } from '../models/workItem';
 
 const MS_PER_HOUR = 1000 * 60 * 60;
 
+/** Formats a duration given in days as whichever unit actually reads
+ * naturally — minutes for anything under an hour, hours for anything under
+ * a day, days otherwise. A card resolved in 12 minutes showing "0.0 dias"
+ * hides exactly the kind of thing "suspiciously fast" is meant to surface. */
+export function formatDuration(days: number): string {
+  const totalMinutes = days * 24 * 60;
+  if (totalMinutes < 60) return `${Math.round(totalMinutes)}min`;
+  const totalHours = days * 24;
+  if (totalHours < 24) return `${totalHours.toFixed(1)}h`;
+  return `${days.toFixed(1)} dias`;
+}
+
 /**
  * A work item's computed timing, broken down by who/what the wait time is
  * attributed to. Every `*Days` getter reflects only the wall-clock time the
@@ -65,6 +77,16 @@ export class ItemMetric {
     return this.generalDurationMs / MS_PER_HOUR / 24.0;
   }
 
+  /** Time spent specifically in the "Backlog" column — a subset of
+   * generalDays (which lumps Backlog together with Em Andamento/Validação
+   * Funcional/Request). Recomputed from the item's own column history using
+   * the same `until` cutoff as every other bucket here (reconstructed from
+   * totalDurationMs since ItemMetric doesn't otherwise carry that cutoff). */
+  get backlogDays(): number {
+    const until = new Date(this.item.createdDate.getTime() + this.totalDurationMs);
+    return this.item.durationInColumnsMs(new Set(['Backlog']), { until }) / MS_PER_HOUR / 24.0;
+  }
+
   /** "Cycle time" in this app always means developer-attributed time
    * (Desenvolvimento / Em Correção) — the one the user is measured on. */
   get cycleTimeDays(): number {
@@ -77,12 +99,21 @@ export class ItemMetric {
     return this.totalDurationMs / MS_PER_HOUR / 24.0;
   }
 
+  /** Time actually worked on the item, by either the developer or the
+   * analyst — Desenvolvedor + Geral, the two stages that are someone's own
+   * judgment call on this card, as opposed to Triagem/Fila/Usuário/Fornecedor
+   * which are waiting on something outside their control. Only used for flow
+   * efficiency — `cycleTimeDays` elsewhere in the app stays developer-only. */
+  get workedDays(): number {
+    return this.cycleTimeDays + this.generalDays;
+  }
+
   /** Flow efficiency: the fraction of the item's total elapsed time that was
-   * actually spent being worked on (developer time) rather than waiting.
-   * 100% would mean it was in Desenvolvimento/Em Correção the whole time;
+   * actually spent being worked on (developer + analyst time) rather than
+   * waiting. 100% would mean it never left Desenvolvimento/Em Correção/Geral;
    * most real flows sit well below that. */
   get flowEfficiencyPercent(): number {
-    return this.totalDays > 0 ? (this.cycleTimeDays / this.totalDays) * 100 : 0;
+    return this.totalDays > 0 ? (this.workedDays / this.totalDays) * 100 : 0;
   }
 
   /** Whether this item was delivered on time — null if it has no promised
@@ -166,10 +197,10 @@ export class ItemMetric {
   }
 
   /** Flags a completed item resolved suspiciously fast — created and closed
-   * within a few hours, which either means a genuinely trivial request or
+   * within an hour, which either means a genuinely trivial request or
    * someone closing it without doing the tracked work. */
   get isSuspiciouslyFast(): boolean {
-    return this.done && this.totalDurationMs / MS_PER_HOUR < 4;
+    return this.done && this.totalDurationMs / MS_PER_HOUR < 1;
   }
 
   get isSuspicious(): boolean {
@@ -262,10 +293,10 @@ export class MetricsSummary {
   get flowEfficiencyPercent(): number | null {
     const list = this.completed;
     if (list.length === 0) return null;
-    const totalActive = list.reduce((sum, m) => sum + m.cycleTimeDays, 0);
+    const totalWorked = list.reduce((sum, m) => sum + m.workedDays, 0);
     const totalElapsed = list.reduce((sum, m) => sum + m.totalDays, 0);
     if (totalElapsed <= 0) return null;
-    return (totalActive / totalElapsed) * 100;
+    return (totalWorked / totalElapsed) * 100;
   }
 
   /** Completed items that have a promised deadline (targetDate) set — the

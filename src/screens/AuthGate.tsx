@@ -31,14 +31,6 @@ export function AuthGate() {
       setAppUser(null);
       return;
     }
-    // TEMPORÁRIO: sessão anônima (botão "acesso provisório" na LoginScreen,
-    // enquanto o Azure AD não libera) — não existe e-mail pra consultar
-    // app_users, então libera direto como admin fictício. Remover isso
-    // junto com signInTemporaryBypass quando o login Microsoft voltar.
-    if (session.user.is_anonymous) {
-      setAppUser({ id: session.user.id, email: '(acesso provisório)', role: 'admin', responsavelName: null });
-      return;
-    }
     const email = session.user.email;
     if (!email) {
       setLookupError('Sua conta Microsoft não retornou um e-mail — não é possível verificar o acesso.');
@@ -54,11 +46,53 @@ export function AuthGate() {
       });
   }, [session]);
 
-  if (session === undefined || (session != null && appUser === undefined)) {
+  const checkingSession = session === undefined || (session != null && appUser === undefined);
+  const [stuck, setStuck] = useState(false);
+
+  // Known supabase-js issue: after the browser reloads a discarded tab
+  // (Chrome's Memory Saver), the session check occasionally hangs forever
+  // instead of just being slow — an internal lock never resolves. Rather
+  // than leave the splash stuck permanently, force one real reload if it's
+  // still checking after a few seconds; that reliably clears the stuck
+  // state, whereas waiting never does. Guarded by a sessionStorage flag so
+  // a genuinely broken session (network down, Supabase outage) reloads
+  // once and then shows a manual retry instead of loop-reloading forever.
+  useEffect(() => {
+    if (!checkingSession) return;
+    const timer = setTimeout(() => {
+      const alreadyRetried = sessionStorage.getItem('authWatchdogRetried') === '1';
+      if (alreadyRetried) {
+        setStuck(true);
+        return;
+      }
+      sessionStorage.setItem('authWatchdogRetried', '1');
+      window.location.reload();
+    }, 6000);
+    return () => clearTimeout(timer);
+  }, [checkingSession]);
+
+  useEffect(() => {
+    if (!checkingSession) sessionStorage.removeItem('authWatchdogRetried');
+  }, [checkingSession]);
+
+  if (checkingSession) {
     return (
       <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16 }}>
         <img src={abapinhoLogo} alt="" style={{ height: 70, objectFit: 'contain' }} />
         <span style={{ color: '#64748B', fontSize: 13 }}>Carregando...</span>
+        {stuck && (
+          <>
+            <span style={{ color: '#64748B', fontSize: 12.5, maxWidth: 280, textAlign: 'center' }}>
+              Está demorando mais que o normal — pode ser uma instabilidade de rede ou do Supabase.
+            </span>
+            <button
+              onClick={() => window.location.reload()}
+              style={{ padding: '10px 16px', borderRadius: 8, border: `1px solid ${BrandColors.border}`, backgroundColor: '#fff', cursor: 'pointer', fontSize: 13 }}
+            >
+              Tentar de novo
+            </button>
+          </>
+        )}
       </div>
     );
   }

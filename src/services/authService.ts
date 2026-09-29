@@ -19,21 +19,8 @@ function rowToAppUser(row: { id: string; email: string; role: string; responsave
 export async function signInWithMicrosoft(): Promise<void> {
   const { error } = await supabase.auth.signInWithOAuth({
     provider: 'azure',
-    options: { scopes: 'email' },
+    options: { scopes: 'email', redirectTo: window.location.origin },
   });
-  if (error) throw error;
-}
-
-// TEMPORÁRIO — enquanto o consentimento de admin do Azure AD não é liberado
-// pela infra. Cria uma sessão Supabase real (anônima, sem Microsoft), pra
-// app_config (RLS: "any authenticated user") continuar legível — mas NÃO
-// passa por app_users, então AuthGate trata esse caso à parte, com um
-// AppUser fixo (admin) montado no client. Isso não é controle de acesso de
-// verdade: qualquer um que abrir o app nesse modo entra como admin. Tirar
-// assim que o consentimento do Azure for aprovado — ver README/aviso na
-// LoginScreen.
-export async function signInTemporaryBypass(): Promise<void> {
-  const { error } = await supabase.auth.signInAnonymously();
   if (error) throw error;
 }
 

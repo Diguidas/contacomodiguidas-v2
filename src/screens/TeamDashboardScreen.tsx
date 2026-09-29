@@ -1,9 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Cell, Pie, PieChart, ResponsiveContainer } from 'recharts';
+import { Bar, BarChart, CartesianGrid, Cell, LabelList, Pie, PieChart, ResponsiveContainer, XAxis, YAxis } from 'recharts';
 import { boardColumnMatches, WorkItem } from '../models/workItem';
-import { ItemMetric, MetricsCalculator } from '../services/metricsService';
-import { CardRating } from '../services/cardRatingService';
+import { formatDuration, ItemMetric, MetricsCalculator } from '../services/metricsService';
+import {
+  backlogToDoneDays,
+  complexityLabelOf,
+  nonTriageColumnsOf,
+  priorityLabelOf,
+} from '../services/labelConsistencyService';
 import { AppSettings } from '../services/settingsService';
 import { Sprint } from '../services/sprintService';
 import {
@@ -12,7 +17,6 @@ import {
   buildPerformanceRanking,
   defaultPerformanceGroupKeys,
   HealthScoreRanking,
-  isAttributedTo,
   performanceGroups,
   ResponsiblePerformance,
   sprintCutoff,
@@ -50,6 +54,10 @@ function hexAlpha(hex: string, alpha: number): string {
 
 function formatDate(d: Date): string {
   return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+}
+
+function formatDateTime(d: Date): string {
+  return `${formatDate(d)} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
 /** Same 80/50 thresholds used elsewhere in the app for on-time delivery. */
@@ -109,6 +117,31 @@ function carriedIntoSprintLocal(m: ItemMetric, sprint: Sprint | null): boolean {
   return end == null || end.getTime() >= sprint.start.getTime();
 }
 
+/** A sprint's "base": created in it or carried into it already open — but
+ * either way, only counts once the card is actually out of Triagem *at that
+ * sprint's end* (Backlog em diante). Checked against `boardColumnAsOf(the
+ * sprint's cutoff)` rather than "ever left Triagem before the cutoff" — a
+ * card that left and then bounced back into Triagem (re-analysis) by the
+ * time the sprint closed hadn't really escaped it, so it shouldn't count
+ * yet either. A card that had *already* closed by that cutoff always counts
+ * regardless of column — but a card still sitting in Triagem or Backlog back
+ * then that only got picked up and finished much later (a different, later
+ * sprint) doesn't get a pass just because it's done *now*: `m.done` is live
+ * status, so this checks the card's real state as of the cutoff instead.
+ * Triagem/Backlog exclusion is specifically about "was this card actually in
+ * flight here" — Backlog is still a waiting room, not real work started.
+ * "Concluído" (endedInSprintLocal) is a separate, overlapping measure: a
+ * card can belong to one sprint's base and close in a later one. */
+function enteredInSprintLocal(m: ItemMetric, sprint: Sprint | null, triageColumns: Set<string>): boolean {
+  if (sprint == null) return true;
+  if (!createdInSprintLocal(m.item, sprint) && !carriedIntoSprintLocal(m, sprint)) return false;
+  const cutoff = sprintCutoff(sprint);
+  const closedByCutoff = m.done && m.endDate != null && m.endDate.getTime() <= cutoff.getTime();
+  if (closedByCutoff) return true;
+  const columnNow = m.item.boardColumnAsOf(cutoff);
+  return !boardColumnMatches(triageColumns, columnNow) && columnNow.trim().toLowerCase() !== 'backlog';
+}
+
 interface SuspiciousRanking {
   name: string;
   completed: number;
@@ -136,6 +169,13 @@ interface WaitRanking {
   name: string;
   count: number;
   totalDays: number;
+  items: ItemMetric[];
+}
+interface WipRankingRow {
+  name: string;
+  count: number;
+  avgAgingDays: number;
+  maxAgingDays: number;
   items: ItemMetric[];
 }
 interface TagRankingRow {
@@ -195,21 +235,22 @@ interface AreaStats {
   closed: number;
   stillOpen: number;
   conversion: number | null;
-  generalDays: number | null;
+  cycleDays: number | null;
 }
 
 /** The 5 headline numbers behind every comparison tile (área/setor/tipo de
  * demanda) and the top KPI strip — computed once here so all of them stay
- * perfectly consistent instead of each widget recomputing its own version. */
-function computeAreaStats(metrics: ItemMetric[], sprint: Sprint | null): AreaStats {
-  const newThisSprint = metrics.filter((m) => createdInSprintLocal(m.item, sprint));
-  const carriedOver = metrics.filter((m) => carriedIntoSprintLocal(m, sprint));
-  const entered = [...newThisSprint, ...carriedOver];
+ * perfectly consistent instead of each widget recomputing its own version.
+ * "Cycle Time" here is the full elapsed time minus Triagem and Backlog —
+ * everything from the moment the card left Backlog to its conclusion. */
+function computeAreaStats(metrics: ItemMetric[], sprint: Sprint | null, triageColumns: Set<string>): AreaStats {
+  const entered = metrics.filter((m) => enteredInSprintLocal(m, sprint, triageColumns));
   const closed = metrics.filter((m) => endedInSprintLocal(m, sprint));
-  const stillOpen = entered.filter((m) => !m.done).length;
+  const stillOpen = entered.filter((m) => !endedInSprintLocal(m, sprint)).length;
   const conversion = entered.length === 0 ? null : (closed.length / entered.length) * 100;
-  const generalDays = closed.length === 0 ? null : closed.reduce((s, m) => s + m.generalDays, 0) / closed.length;
-  return { entered: entered.length, closed: closed.length, stillOpen, conversion, generalDays };
+  const cycleDays =
+    closed.length === 0 ? null : closed.reduce((s, m) => s + (m.totalDays - m.triageDays - m.backlogDays), 0) / closed.length;
+  return { entered: entered.length, closed: closed.length, stillOpen, conversion, cycleDays };
 }
 
 /** Whole-team view: every responsible, every area, together — aggregated
@@ -226,7 +267,6 @@ export function TeamDashboardScreen({
   sprints,
   onSprintChanged,
   onTabChange,
-  ratings,
   ratingsLoading,
 }: {
   settings: AppSettings;
@@ -241,7 +281,6 @@ export function TeamDashboardScreen({
   // scrollable div, so switching between them needs the same reset a full
   // screen change gets.
   onTabChange?: () => void;
-  ratings: CardRating[];
   ratingsLoading: boolean;
 }) {
   const preferredAreaOrder = ['Sustentação', 'Dados'];
@@ -259,12 +298,6 @@ export function TeamDashboardScreen({
   const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set(defaultPerformanceGroupKeys));
   const [discountedRequestTypes, setDiscountedRequestTypes] = useState<Set<string>>(new Set());
   const [discountSuspicious, setDiscountSuspicious] = useState(false);
-  // Own chip state for "Desvio de Cycle Time" — independent from the
-  // Ranking de performance chips above, so toggling one doesn't move the
-  // other.
-  const [cycleTimeGroups, setCycleTimeGroups] = useState<Set<string>>(new Set(defaultPerformanceGroupKeys));
-  const [cycleTimeDiscountedRequestTypes, setCycleTimeDiscountedRequestTypes] = useState<Set<string>>(new Set());
-  const [cycleTimeDiscountSuspicious, setCycleTimeDiscountSuspicious] = useState(false);
   const [breakdownDialog, setBreakdownDialog] = useState<{ label: string; metrics: ItemMetric[] } | null>(null);
   const [personDialog, setPersonDialog] = useState<{
     name: string;
@@ -279,7 +312,7 @@ export function TeamDashboardScreen({
 
   const asOf = selectedSprint == null ? undefined : sprintCutoff(selectedSprint);
 
-  const rawMetrics = (() => {
+  const { rawMetrics, liveMetrics } = (() => {
     const calculator = new MetricsCalculator({
       triageColumns: settings.triageColumnSet,
       queueColumns: settings.queueColumnSet,
@@ -293,7 +326,14 @@ export function TeamDashboardScreen({
     // Only User Story cards — Bugs, Tasks and Features are other kinds of
     // work item, not the day-to-day demand this view is meant to track.
     const valid = items.filter((i) => !i.isCancelled).filter((i) => i.type.trim().toLowerCase() === 'user story');
-    return calculator.calculate(valid, asOf).metrics;
+    return {
+      rawMetrics: calculator.calculate(valid, asOf).metrics,
+      // Always "as of now" — never capped to a past sprint's cutoff, unlike
+      // rawMetrics. WIP needs this: a card still open from 3 sprints ago
+      // should show its real, live accumulated wait, not freeze at whatever
+      // sprint happens to be selected in the dropdown right now.
+      liveMetrics: calculator.calculate(valid).metrics,
+    };
   })();
 
   // Every ranking/table on this screen is scoped to this — an item only
@@ -304,7 +344,7 @@ export function TeamDashboardScreen({
     selectedSprint == null
       ? rawMetrics
       : rawMetrics.filter(
-          (m) => createdInSprintLocal(m.item, selectedSprint) || carriedIntoSprintLocal(m, selectedSprint) || endedInSprintLocal(m, selectedSprint),
+          (m) => enteredInSprintLocal(m, selectedSprint, settings.triageColumnSet) || endedInSprintLocal(m, selectedSprint),
         );
 
   const sprintScopedItems = allMetrics.map((m) => m.item);
@@ -312,10 +352,22 @@ export function TeamDashboardScreen({
   // Open items, excluding Triagem (never counted as "aberto" per the
   // app-wide rule) and items sitting on an unusable/empty board column.
   const openNonTriageMetrics = allMetrics.filter(
-    (m) => !m.done && hasUsableColumn(m.item) && !boardColumnMatches(settings.triageColumnSet, m.item.currentBoardColumn),
+    (m) => !endedInSprintLocal(m, selectedSprint) && hasUsableColumn(m.item) && !boardColumnMatches(settings.triageColumnSet, m.item.currentBoardColumn),
   );
 
-  const areaCardMetrics = allMetrics.filter((m) => m.done || !boardColumnMatches(settings.triageColumnSet, m.item.currentBoardColumn));
+  // A sprint's "base": entered it (created or carried in, and past Triagem
+  // by the sprint's end) or closed during it — the same rule
+  // `computeAreaStats` uses for the tile numbers, so this drill-down list
+  // always matches what the tile shows. "Concluído" (endedInSprintLocal) is
+  // independent of when the card entered — a card can belong to an earlier
+  // sprint's base and still close in this one, or vice versa. Still-open
+  // items currently sitting in Triagem stay excluded either way (never
+  // counted as "aberto" per the app-wide rule).
+  const areaCardMetrics = allMetrics.filter(
+    (m) =>
+      endedInSprintLocal(m, selectedSprint) ||
+      (enteredInSprintLocal(m, selectedSprint, settings.triageColumnSet) && !boardColumnMatches(settings.triageColumnSet, m.item.currentBoardColumn)),
+  );
 
   function groupByArea(metrics: ItemMetric[]) {
     return groupBy(metrics, (m) => areaLeaf(m.item.areaPath));
@@ -345,8 +397,14 @@ export function TeamDashboardScreen({
     return list;
   }
 
+  // Mínimo de itens na Base pra entrar no ranking — sem isso, alguém com
+  // Base=1 e 100% ficaria acima de alguém com Base=20 e 90%, uma amostra
+  // pequena demais pra dizer qualquer coisa sobre desempenho real.
+  const PERFORMANCE_MIN_BASE = 3;
   const performanceRanking = (() => {
-    const rows = buildPerformanceRanking({ items: sprintScopedItems, settings, selectedGroupKeys: selectedGroups, asOf });
+    const rows = buildPerformanceRanking({ items: sprintScopedItems, settings, selectedGroupKeys: selectedGroups, asOf }).filter(
+      (r) => r.base >= PERFORMANCE_MIN_BASE,
+    );
     rows.sort((a, b) => (b.percent !== a.percent ? b.percent - a.percent : b.base - a.base));
     return rows;
   })();
@@ -359,9 +417,6 @@ export function TeamDashboardScreen({
   function isDiscounted(m: ItemMetric): boolean {
     return (discountSuspicious && m.isSuspicious) || discountedRequestTypes.has(m.item.requestType.trim());
   }
-  function isDiscountedForCycleTime(m: ItemMetric): boolean {
-    return (cycleTimeDiscountSuspicious && m.isSuspicious) || cycleTimeDiscountedRequestTypes.has(m.item.requestType.trim());
-  }
   function netClosed(p: ResponsiblePerformance): number {
     return p.items.filter((m) => m.done && !isDiscounted(m)).length;
   }
@@ -369,21 +424,69 @@ export function TeamDashboardScreen({
   // WIP: how many items each person currently has open, period — not scoped
   // to the selected sprint (a card sitting open for 3 sprints straight is
   // exactly the kind of thing WIP is meant to surface, and hiding it behind
-  // the sprint filter would defeat the point). Built from rawMetrics, not
-  // allMetrics.
+  // the sprint filter would defeat the point). Built from liveMetrics (never
+  // capped to a past sprint's cutoff the way rawMetrics/allMetrics are), not
+  // allMetrics — otherwise picking an old sprint in the dropdown would
+  // freeze every open item's accumulated days at that sprint's end instead
+  // of showing the real, live total.
   // attributedGroupBy: for Guilherme specifically, this also folds in open
   // items tagged for him but assigned elsewhere — as long as that card is
   // currently sitting in Desenvolvedor. A tagged card still stuck in
   // Triagem/Fila/Usuário/Fornecedor isn't his WIP yet, same rule as
   // everywhere else this merge applies.
-  const wipRanking: WaitRanking[] = (() => {
+  const wipRanking: WipRankingRow[] = (() => {
     const byName = attributedGroupBy(
-      rawMetrics.filter((m) => !m.done),
+      liveMetrics.filter((m) => !m.done),
       settings,
     );
-    const rows = [...byName.entries()].map(([name, list]) => ({ name, count: list.length, totalDays: list.reduce((s, m) => s + m.totalDays, 0), items: list }));
+    const rows = [...byName.entries()].map(([name, list]) => ({
+      name,
+      count: list.length,
+      avgAgingDays: list.length === 0 ? 0 : list.reduce((s, m) => s + m.totalDays, 0) / list.length,
+      maxAgingDays: list.reduce((mx, m) => Math.max(mx, m.totalDays), 0),
+      items: list,
+    }));
     rows.sort((a, b) => b.count - a.count);
     return rows;
+  })();
+
+  // WIP by board column — every open item (not scoped to the selected
+  // sprint, same live snapshot wipRanking uses), grouped by its literal
+  // current column and ordered along the pipeline (Triagem -> Backlog ->
+  // resto do Geral -> Fila -> Desenvolvedor -> Fornecedor -> Usuário) so the
+  // bars read left-to-right the same way a card actually flows through the
+  // board — columns configured but currently empty still show up as 0,
+  // rather than disappearing from the chart.
+  const wipByColumn: { name: string; count: number }[] = (() => {
+    const openItems = liveMetrics.filter((m) => !m.done);
+    const seen = new Set<string>();
+    const ordered: string[] = [];
+    function addAll(colSet: Set<string>) {
+      for (const c of colSet) {
+        const key = c.trim().toLowerCase();
+        if (key === '' || seen.has(key)) continue;
+        seen.add(key);
+        ordered.push(c);
+      }
+    }
+    const generalList = [...settings.generalColumnSet];
+    addAll(settings.triageColumnSet);
+    addAll(new Set(generalList.filter((c) => c.trim().toLowerCase() === 'backlog')));
+    addAll(new Set(generalList.filter((c) => c.trim().toLowerCase() !== 'backlog')));
+    addAll(settings.queueColumnSet);
+    addAll(settings.developerColumnSet);
+    addAll(settings.vendorColumnSet);
+    addAll(settings.userColumnSet);
+    for (const m of openItems) {
+      const col = m.item.currentBoardColumn.trim();
+      if (col === '' || seen.has(col.toLowerCase())) continue;
+      seen.add(col.toLowerCase());
+      ordered.push(col);
+    }
+    return ordered.map((name) => ({
+      name,
+      count: openItems.filter((m) => m.item.currentBoardColumn.trim().toLowerCase() === name.trim().toLowerCase()).length,
+    }));
   })();
 
   // Reverse of WorkItem.childIds — which Feature (if any) a given item is a
@@ -518,8 +621,8 @@ export function TeamDashboardScreen({
     ];
     return groups.map((g) => {
       const tagged = allMetrics.filter((m) => g.matches(m.item.tags));
-      const stats = computeAreaStats(tagged, selectedSprint);
-      const enteredItems = tagged.filter((m) => createdInSprintLocal(m.item, selectedSprint) || carriedIntoSprintLocal(m, selectedSprint));
+      const stats = computeAreaStats(tagged, selectedSprint, settings.triageColumnSet);
+      const enteredItems = tagged.filter((m) => enteredInSprintLocal(m, selectedSprint, settings.triageColumnSet));
       const closedItems = tagged.filter((m) => endedInSprintLocal(m, selectedSprint));
       const devItems = closedItems.filter((m) => g.devDaysOf(m) > 0);
       const queueItems = closedItems.filter((m) => m.queueDays > 0);
@@ -539,7 +642,13 @@ export function TeamDashboardScreen({
     });
   })();
 
-  const healthScoreRanking: HealthScoreRanking[] = buildHealthScoreRanking({ items: sprintScopedItems, settings, asOf });
+  // Mesmo corte do Ranking de performance: sem um mínimo de concluídos,
+  // alguém com 1 item perfeito (100/100/100) fica acima de quem tem uma
+  // amostra grande e consistente, mas não perfeita.
+  const HEALTH_SCORE_MIN_COMPLETED = 3;
+  const healthScoreRanking: HealthScoreRanking[] = buildHealthScoreRanking({ items: sprintScopedItems, settings, asOf }).filter(
+    (r) => r.completedItems.length >= HEALTH_SCORE_MIN_COMPLETED,
+  );
 
   function waitRanking(metrics: ItemMetric[], daysOf: (m: ItemMetric) => number): WaitRanking[] {
     const byName = groupBy(metrics, (m) => m.item.assignedTo.trim());
@@ -633,6 +742,7 @@ export function TeamDashboardScreen({
                 groups={areas}
                 byGroup={byAreaAll}
                 sprint={selectedSprint}
+                triageColumns={settings.triageColumnSet}
                 onTileClick={(label, metrics) => setBreakdownDialog({ label, metrics })}
               />
               <div style={{ height: 28 }} />
@@ -666,31 +776,6 @@ export function TeamDashboardScreen({
                 onSelect={(label, metrics) => setBreakdownDialog({ label, metrics })}
               />
               <div style={{ height: 28 }} />
-              <SectionHeader
-                icon={<HeartPulse size={17} strokeWidth={1.75} />}
-                iconColor={BrandColors.warning}
-                title="Consistência de etiquetagem por responsável"
-                subtitle="Compara, por pessoa, o tempo médio dela numa etiqueta contra a média do time na mesma etiqueta — só entra na lista quem tem pelo menos 3 itens concluídos naquela etiqueta específica, pra não julgar ninguém em cima de 1 ou 2 cards."
-              />
-              <div style={{ height: 12 }} />
-              <div style={{ fontSize: 12.5, fontWeight: 700, color: '#64748B', marginBottom: 6 }}>Por complexidade</div>
-              <LabelConsistencyTable
-                metrics={allMetrics.filter((m) => m.done)}
-                settings={settings}
-                dimension="complexity"
-                minSample={3}
-                onSelect={(label, metrics) => setBreakdownDialog({ label, metrics })}
-              />
-              <div style={{ height: 20 }} />
-              <div style={{ fontSize: 12.5, fontWeight: 700, color: '#64748B', marginBottom: 6 }}>Por prioridade</div>
-              <LabelConsistencyTable
-                metrics={allMetrics.filter((m) => m.done)}
-                settings={settings}
-                dimension="priority"
-                minSample={3}
-                onSelect={(label, metrics) => setBreakdownDialog({ label, metrics })}
-              />
-              <div style={{ height: 28 }} />
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'flex-start' }}>
                 <div style={{ flex: '1 1 380px' }}>
                   <GroupCountTable
@@ -698,6 +783,7 @@ export function TeamDashboardScreen({
                     groups={departments}
                     byGroup={byDepartmentAll}
                     sprint={selectedSprint}
+                    triageColumns={settings.triageColumnSet}
                     onRowClick={(label, metrics) => setBreakdownDialog({ label, metrics })}
                   />
                 </div>
@@ -707,6 +793,7 @@ export function TeamDashboardScreen({
                     groups={requestTypesAll}
                     byGroup={byRequestTypeAll}
                     sprint={selectedSprint}
+                    triageColumns={settings.triageColumnSet}
                     onRowClick={(label, metrics) => setBreakdownDialog({ label, metrics })}
                   />
                 </div>
@@ -731,8 +818,17 @@ export function TeamDashboardScreen({
               <SectionHeader
                 icon={<LayoutList size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.developer}
-                title="Carga de trabalho (WIP)"
-                subtitle='Quantos itens cada responsável tem em aberto agora — sem olhar a sprint selecionada, é o "quanto de bola no ar" de cada um neste momento. Muita coisa em aberto ao mesmo tempo é sinal de troca de contexto, não de produtividade. O Guilherme também soma itens marcados com sua tag que estão parados agora em Desenvolvedor — clique na linha pra ver "Direto" vs "Tag" de cada item.'
+                title="WIP por coluna"
+                subtitle="Quantos itens estão abertos agora em cada coluna do board — sem olhar a sprint selecionada, é a foto ao vivo de onde o trabalho está empacado."
+              />
+              <div style={{ height: 12 }} />
+              <WipByColumnChart data={wipByColumn} />
+              <div style={{ height: 28 }} />
+              <SectionHeader
+                icon={<LayoutList size={17} strokeWidth={1.75} />}
+                iconColor={BrandColors.developer}
+                title="Carga de trabalho (WIP) por responsável"
+                subtitle='Quantos itens cada responsável tem em aberto agora, a média de dias que eles estão parados com ele (aging médio) e o mais antigo deles (maior aging) — sem olhar a sprint selecionada, é o "quanto de bola no ar" de cada um neste momento. Muita coisa em aberto ao mesmo tempo é sinal de troca de contexto, não de produtividade. O Guilherme também soma itens marcados com sua tag que estão parados agora em Desenvolvedor — clique na linha pra ver "Direto" vs "Tag" de cada item.'
               />
               <div style={{ height: 12 }} />
               <WipTable
@@ -741,7 +837,7 @@ export function TeamDashboardScreen({
                   setPersonDialog({
                     name,
                     metrics,
-                    extraColumn: { label: 'Dias aberto', render: (m) => `${m.totalDays.toFixed(1)}d` },
+                    extraColumn: { label: 'Dias aberto', render: (m) => `${formatDuration(m.totalDays)}` },
                     sortMode: 'createdAsc',
                     projectOf: (m) => featureOfChild.get(m.item.id) ?? null,
                   })
@@ -761,7 +857,7 @@ export function TeamDashboardScreen({
                 icon={<HeartPulse size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.danger}
                 title="Health Score"
-                subtitle='Um número só por responsável, pra saber rápido quem merece uma olhada mais de perto — média de Rastreabilidade (não suspeitos / concluídos), Previsibilidade (no prazo / concluídos) e Velocidade (rápidos, excluindo suspeitos / concluídos). Os 3 usam o mesmo denominador — total de concluídos — pra ficar comparável entre pessoas. Clique numa linha pra ver item a item. Não substitui os rankings abaixo, só resume.'
+                subtitle={`Um número só por responsável, pra saber rápido quem merece uma olhada mais de perto — média de Rastreabilidade (não suspeitos / concluídos), Previsibilidade (no prazo / concluídos) e Velocidade (rápidos, excluindo suspeitos / concluídos). Os 3 usam o mesmo denominador — total de concluídos — pra ficar comparável entre pessoas. Só entra quem tem pelo menos ${HEALTH_SCORE_MIN_COMPLETED} concluídos, pra uma amostra pequena não inflar o score. Clique numa linha pra ver item a item. Não substitui os rankings abaixo, só resume.`}
               />
               <div style={{ height: 12 }} />
               <HealthScoreTable rows={healthScoreRanking} onSelect={setHealthDetailRow} />
@@ -770,7 +866,7 @@ export function TeamDashboardScreen({
                 icon={<Trophy size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.primary}
                 title="Ranking de performance"
-                subtitle='Base = itens atribuídos, em aberto numa das colunas marcadas abaixo (ou já concluídos, não importa a coluna) + itens de outra pessoa com sua tag que foram concluídos.'
+                subtitle={`Base = itens atribuídos, em aberto numa das colunas marcadas abaixo (ou já concluídos, não importa a coluna) + itens de outra pessoa com sua tag que foram concluídos. Só entra no ranking quem tem Base de pelo menos ${PERFORMANCE_MIN_BASE} itens, pra uma amostra pequena não inflar posição.`}
               />
               <div style={{ height: 12 }} />
               <FilterBox message='Cada chip é uma coluna do board. Marcado = itens ainda abertos ali contam no Base de quem está com eles agora. Desmarcado = eles somem da conta enquanto ficarem nessa coluna (mas contam quando forem concluídos, seja qual for a coluna). Passe o mouse num chip pra ver o que ele representa.'>
@@ -818,69 +914,10 @@ export function TeamDashboardScreen({
               />
               <div style={{ height: 28 }} />
               <SectionHeader
-                icon={<Zap size={17} strokeWidth={1.75} />}
-                iconColor={BrandColors.developer}
-                title="Desvio de Cycle Time por responsável"
-                subtitle="Cycle Time (soma dos estágios marcados abaixo) de cada responsável contra a média do time, já descontando suspeitos/tipo de solicitação conforme os chips. Só entra na lista quem tem pelo menos 3 itens concluídos. As colunas Dados e Sustentação são a média de cada área, fixas (“—” quando ninguém do time tem item concluído lá), pra comparar qualquer um contra o benchmark do setor dele."
-              />
-              <div style={{ height: 12 }} />
-              <FilterBox message='Cada chip é uma coluna do board. Marcado = o tempo do card nessa coluna entra na soma do Cycle Time. Passe o mouse num chip pra ver o que ele representa.'>
-                {performanceGroups.map((g) => (
-                  <span key={g.key} title={g.description}>
-                    <ToggleChip
-                      label={g.label}
-                      selected={cycleTimeGroups.has(g.key)}
-                      onSelected={(selected) => {
-                        setCycleTimeGroups((prev) => {
-                          const next = new Set(prev);
-                          if (selected) next.add(g.key);
-                          else next.delete(g.key);
-                          return next;
-                        });
-                      }}
-                    />
-                  </span>
-                ))}
-              </FilterBox>
-              <div style={{ height: 12 }} />
-              <FilterBox message='Desmarque um tipo de solicitação, e/ou desconte os itens suspeitos, pra eles não contarem no Cycle Time.'>
-                <ToggleChip label="Descontar suspeitos" selected={cycleTimeDiscountSuspicious} onSelected={setCycleTimeDiscountSuspicious} icon="⊘" />
-                {requestTypes.map((type) => (
-                  <ToggleChip
-                    key={type}
-                    label={type}
-                    selected={!cycleTimeDiscountedRequestTypes.has(type)}
-                    onSelected={(selected) => {
-                      setCycleTimeDiscountedRequestTypes((prev) => {
-                        const next = new Set(prev);
-                        if (selected) next.delete(type);
-                        else next.add(type);
-                        return next;
-                      });
-                    }}
-                  />
-                ))}
-              </FilterBox>
-              <div style={{ height: 16 }} />
-              <CycleTimeByAreaTable
-                metrics={allMetrics.filter((m) => m.done && !isDiscountedForCycleTime(m))}
-                settings={settings}
-                selectedGroups={cycleTimeGroups}
-                minSample={3}
-                onSelect={(name, metrics) =>
-                  setPersonDialog({
-                    name,
-                    metrics,
-                    extraColumn: { label: 'Cycle Time', render: (m) => `${stageDaysSelected(m, cycleTimeGroups).toFixed(1)}d` },
-                  })
-                }
-              />
-              <div style={{ height: 28 }} />
-              <SectionHeader
                 icon={<EyeOff size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.danger}
-                title="Ranking de itens suspeitos"
-                subtitle='Concluídos rápido demais (< 4h) ou com boa parte do tempo sem passagem por nenhuma coluna rastreada.'
+                title="Média de itens suspeitos"
+                subtitle='Concluídos rápido demais (< 1h) ou com boa parte do tempo sem passagem por nenhuma coluna rastreada.'
               />
               <div style={{ height: 12 }} />
               <SuspiciousTable
@@ -899,7 +936,7 @@ export function TeamDashboardScreen({
                             {m.isSuspiciouslyFast && m.hasUntrackedGap
                               ? 'Rápido demais + gap'
                               : m.isSuspiciouslyFast
-                                ? 'Rápido demais (<4h)'
+                                ? 'Rápido demais (<1h)'
                                 : 'Gap sem rastro'}
                           </span>
                         ),
@@ -911,7 +948,7 @@ export function TeamDashboardScreen({
               <SectionHeader
                 icon={<Calendar size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.user}
-                title="Ranking de previsibilidade de prazo"
+                title="Média de previsibilidade de prazo"
                 subtitle='% de itens concluídos, entre os que tinham prazo, entregues dentro do prazo original — mas o ranking pesa pela cobertura (quantos dos concluídos totais tinham prazo pra começo de conversa), pra 100% em 1 de 20 não subir mais que 90% em 18 de 20.'
               />
               <div style={{ height: 12 }} />
@@ -942,28 +979,28 @@ export function TeamDashboardScreen({
               <SectionHeader
                 icon={<Inbox size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.triage}
-                title="Ranking de velocidade de Triagem"
+                title="Média de velocidade de Triagem"
                 subtitle='Mediana, média e P85 do tempo em Triagem, só nos itens concluídos que de fato passaram um tempo mensurável lá (itens que nunca tocaram Triagem não entram na conta de ninguém) — do mais rápido para o mais lento a tirar um card de lá.'
               />
               <div style={{ height: 12 }} />
               <CycleTimeTable
                 rows={triageSpeedRanking}
                 onRowClick={(name, metrics) =>
-                  setPersonDialog({ name, metrics, extraColumn: { label: 'Dias em Triagem', render: (m) => `${m.triageDays.toFixed(1)}d` } })
+                  setPersonDialog({ name, metrics, extraColumn: { label: 'Dias em Triagem', render: (m) => `${formatDuration(m.triageDays)}` } })
                 }
               />
               <div style={{ height: 28 }} />
               <SectionHeader
                 icon={<CheckCircle2 size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.queue}
-                title="Ranking de velocidade na fila"
+                title="Média de velocidade na fila"
                 subtitle='Mediana, média e P85 do tempo em "Liberado para Desenvolvimento", só nos itens concluídos que de fato passaram um tempo mensurável lá — do mais rápido para o mais lento a pegar um card da fila.'
               />
               <div style={{ height: 12 }} />
               <CycleTimeTable
                 rows={queueSpeedRanking}
                 onRowClick={(name, metrics) =>
-                  setPersonDialog({ name, metrics, extraColumn: { label: 'Dias na Fila', render: (m) => `${m.queueDays.toFixed(1)}d` } })
+                  setPersonDialog({ name, metrics, extraColumn: { label: 'Dias na Fila', render: (m) => `${formatDuration(m.queueDays)}` } })
                 }
               />
               <div style={{ height: 28 }} />
@@ -988,7 +1025,7 @@ export function TeamDashboardScreen({
                     subtitle='Quem tem mais itens presos na Triagem agora, por dias acumulados de espera — indica gargalo de entrada, não culpa do responsável.'
                     rows={triageWaitRanking}
                     onRowClick={(name, metrics) =>
-                      setPersonDialog({ name, metrics, extraColumn: { label: 'Dias em Triagem', render: (m) => `${m.triageDays.toFixed(1)}d` } })
+                      setPersonDialog({ name, metrics, extraColumn: { label: 'Dias em Triagem', render: (m) => `${formatDuration(m.triageDays)}` } })
                     }
                   />
                 </div>
@@ -1000,7 +1037,7 @@ export function TeamDashboardScreen({
                     subtitle='Quem tem mais itens já triados esperando um desenvolvedor pegar, por dias acumulados de espera na fila.'
                     rows={queueWaitRanking}
                     onRowClick={(name, metrics) =>
-                      setPersonDialog({ name, metrics, extraColumn: { label: 'Dias na Fila', render: (m) => `${m.queueDays.toFixed(1)}d` } })
+                      setPersonDialog({ name, metrics, extraColumn: { label: 'Dias na Fila', render: (m) => `${formatDuration(m.queueDays)}` } })
                     }
                   />
                 </div>
@@ -1012,7 +1049,7 @@ export function TeamDashboardScreen({
                     subtitle='Quem tem mais itens travados esperando definição/validação do solicitante, por dias acumulados de espera.'
                     rows={userWaitRankingByOwner}
                     onRowClick={(name, metrics) =>
-                      setPersonDialog({ name, metrics, extraColumn: { label: 'Dias aguardando Usuário', render: (m) => `${m.userDays.toFixed(1)}d` } })
+                      setPersonDialog({ name, metrics, extraColumn: { label: 'Dias aguardando Usuário', render: (m) => `${formatDuration(m.userDays)}` } })
                     }
                   />
                 </div>
@@ -1024,7 +1061,7 @@ export function TeamDashboardScreen({
                     subtitle='Quem tem mais itens travados esperando um fornecedor externo, por dias acumulados de espera.'
                     rows={vendorWaitRankingByOwner}
                     onRowClick={(name, metrics) =>
-                      setPersonDialog({ name, metrics, extraColumn: { label: 'Dias aguardando Fornecedor', render: (m) => `${m.vendorDays.toFixed(1)}d` } })
+                      setPersonDialog({ name, metrics, extraColumn: { label: 'Dias aguardando Fornecedor', render: (m) => `${formatDuration(m.vendorDays)}` } })
                     }
                   />
                 </div>
@@ -1039,13 +1076,14 @@ export function TeamDashboardScreen({
               <ItemListTable metrics={userWaitMetrics} valueLabel="Dias aguardando" valueSelector={(m) => m.userDays} />
             </>
           )}
-          {tab === 3 && <RatingsTab ratings={ratings} ratingsLoading={ratingsLoading} />}
+          {tab === 3 && <RatingsTab ratingsLoading={ratingsLoading} />}
         </div>
       </div>
       {breakdownDialog && (
         <ResponsibleBreakdownDialog
           label={breakdownDialog.label}
           metrics={breakdownDialog.metrics}
+          statusOf={(m) => endedInSprintLocal(m, selectedSprint)}
           onClose={() => setBreakdownDialog(null)}
           onSelectPerson={(name, metrics) => setPersonDialog({ name, metrics })}
         />
@@ -1057,6 +1095,8 @@ export function TeamDashboardScreen({
           extraColumn={personDialog.extraColumn}
           sortMode={personDialog.sortMode}
           projectOf={personDialog.projectOf}
+          statusOf={(m) => endedInSprintLocal(m, selectedSprint)}
+          columnOf={(m) => (selectedSprint == null ? m.item.currentBoardColumn : m.item.boardColumnAsOf(sprintCutoff(selectedSprint)))}
           onClose={() => setPersonDialog(null)}
         />
       )}
@@ -1072,7 +1112,7 @@ function TeamTabBar({ tab, setTab }: { tab: 0 | 1 | 2 | 3; setTab: (t: 0 | 1 | 2
   const tabs: { icon: ReactNode; label: string }[] = [
     { icon: <BarChart3 size={15} strokeWidth={2} />, label: 'Visão geral' },
     { icon: <Trophy size={15} strokeWidth={2} />, label: 'Performance' },
-    { icon: <Hourglass size={15} strokeWidth={2} />, label: 'Sofrimento & filas' },
+    { icon: <Hourglass size={15} strokeWidth={2} />, label: 'Gargalos e Esperas' },
     { icon: <Star size={15} strokeWidth={2} />, label: 'Avaliação' },
   ];
   return (
@@ -1109,124 +1149,12 @@ function TeamTabBar({ tab, setTab }: { tab: 0 | 1 | 2 | 3; setTab: (t: 0 | 1 | 2
   );
 }
 
-function StarsDisplay({ stars, size = 13 }: { stars: number; size?: number }) {
-  return (
-    <div style={{ display: 'flex', gap: 1 }}>
-      {[1, 2, 3, 4, 5].map((n) => (
-        <Star key={n} size={size} strokeWidth={1.75} fill={n <= stars ? '#F59E0B' : 'none'} color={n <= stars ? '#F59E0B' : '#CBD5E1'} />
-      ))}
-    </div>
-  );
-}
-
-function formatRatingDate(d: Date): string {
-  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
-}
-
-/** "Avaliação": what the team gave (card_ratings, written from the
- * Dashboard's "Avalie seus cards concluídos") grouped by setor (department)
- * so it's easy to see which área is generating the roughest tickets —
- * plus a placeholder for what users give back, which isn't wired to any
- * data source yet (waiting on that to be supplied externally). */
-function RatingsTab({ ratings, ratingsLoading }: { ratings: CardRating[]; ratingsLoading: boolean }) {
-  const byDepartment = new Map<string, CardRating[]>();
-  for (const r of ratings) {
-    const dept = r.department.trim() === '' ? 'Sem setor' : r.department.trim();
-    if (!byDepartment.has(dept)) byDepartment.set(dept, []);
-    byDepartment.get(dept)!.push(r);
-  }
-  const departments = [...byDepartment.entries()].sort((a, b) => b[1].length - a[1].length);
-  const overallAvg = ratings.length === 0 ? null : ratings.reduce((s, r) => s + r.stars, 0) / ratings.length;
-  const sortedByDate = [...ratings].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-
+/** "Avaliação": what users/solicitantes give back for our atendimento —
+ * not wired to any data source yet (waiting on that to be supplied
+ * externally). */
+function RatingsTab({ ratingsLoading }: { ratingsLoading: boolean }) {
   return (
     <>
-      <SectionHeader
-        icon={<Star size={17} strokeWidth={1.75} />}
-        iconColor={BrandColors.warning}
-        title="Avaliações que demos"
-        subtitle='Nota de 1 a 5 estrelas + comentário que cada responsável deu pros próprios cards concluídos, dada na tela de Dashboard dele — sobre como foi atender aquele chamado específico.'
-      />
-      <div style={{ height: 12 }} />
-      {ratingsLoading ? (
-        <div style={{ ...cardStyle(), color: '#64748B', fontSize: 13 }}>Carregando avaliações...</div>
-      ) : ratings.length === 0 ? (
-        <div style={{ ...cardStyle(), color: '#64748B', fontSize: 13 }}>Ninguém avaliou nenhum card concluído ainda.</div>
-      ) : (
-        <>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
-            <div style={{ ...cardStyle(), flex: '1 1 200px', minWidth: 180 }}>
-              <div style={{ fontSize: 12, color: '#64748B', fontWeight: 600 }}>Média geral</div>
-              <div style={{ height: 6 }} />
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <StarsDisplay stars={Math.round(overallAvg ?? 0)} size={16} />
-                <span style={{ fontSize: 18, fontWeight: 700 }}>{overallAvg!.toFixed(1)}</span>
-              </div>
-              <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 4 }}>
-                {ratings.length} {ratings.length === 1 ? 'avaliação' : 'avaliações'}
-              </div>
-            </div>
-            {departments.map(([dept, list]) => {
-              const avg = list.reduce((s, r) => s + r.stars, 0) / list.length;
-              return (
-                <div key={dept} style={{ ...cardStyle(), flex: '1 1 200px', minWidth: 180 }}>
-                  <div style={{ fontSize: 12, color: '#64748B', fontWeight: 600 }}>{dept}</div>
-                  <div style={{ height: 6 }} />
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <StarsDisplay stars={Math.round(avg)} size={16} />
-                    <span style={{ fontSize: 18, fontWeight: 700 }}>{avg.toFixed(1)}</span>
-                  </div>
-                  <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 4 }}>
-                    {list.length} {list.length === 1 ? 'avaliação' : 'avaliações'}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-          <div style={{ height: 20 }} />
-          <TableCard isEmpty={false} emptyMessage="">
-            <table style={tableStyle()}>
-              <thead>
-                <tr>
-                  <Th>ID</Th>
-                  <Th>Card</Th>
-                  <Th>Solicitante</Th>
-                  <Th>Setor</Th>
-                  <Th>Avaliado por</Th>
-                  <Th>Nota</Th>
-                  <Th>Comentário</Th>
-                  <Th>Data</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortedByDate.map((r) => (
-                  <tr key={r.workItemId}>
-                    <Td>{r.workItemId}</Td>
-                    <Td>
-                      <span style={{ display: 'inline-block', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.itemTitle}</span>
-                    </Td>
-                    <Td>{r.requesterName.trim() === '' ? '—' : r.requesterName}</Td>
-                    <Td>{r.department.trim() === '' ? 'Sem setor' : r.department}</Td>
-                    <Td>
-                      <ResponsibleTag name={r.ratedBy} />
-                    </Td>
-                    <Td>
-                      <StarsDisplay stars={r.stars} />
-                    </Td>
-                    <Td>
-                      <span style={{ display: 'inline-block', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {r.comment.trim() === '' ? '—' : r.comment}
-                      </span>
-                    </Td>
-                    <Td>{formatRatingDate(r.createdAt)}</Td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </TableCard>
-        </>
-      )}
-      <div style={{ height: 28 }} />
       <SectionHeader
         icon={<Star size={17} strokeWidth={1.75} />}
         iconColor={BrandColors.developer}
@@ -1235,7 +1163,7 @@ function RatingsTab({ ratings, ratingsLoading }: { ratings: CardRating[]; rating
       />
       <div style={{ height: 12 }} />
       <div style={{ ...cardStyle(), color: '#64748B', fontSize: 13 }}>
-        Ainda sem dado. Assim que a fonte de avaliação dos usuários for definida, ela aparece aqui do mesmo jeito.
+        {ratingsLoading ? 'Carregando...' : 'Ainda sem dado. Assim que a fonte de avaliação dos usuários for definida, ela aparece aqui do mesmo jeito.'}
       </div>
     </>
   );
@@ -1318,39 +1246,6 @@ function DistributionPieCard({
       )}
     </div>
   );
-}
-
-function complexityLabelOf(m: ItemMetric): string {
-  return m.item.complexity.trim() === '' ? 'Sem complexidade' : m.item.complexity.trim();
-}
-function priorityLabelOf(m: ItemMetric): string {
-  return m.item.priority == null ? 'Sem prioridade' : `Prioridade ${m.item.priority}`;
-}
-
-/** Rows = complexidade, columns = prioridade, each cell = average time from
- * Backlog to Concluído (first non-Triagem board column to the done moment —
- * Triagem itself excluded, same as everywhere else in this screen) + count,
- * among completed items in that combination. The point isn't the exact
- * numbers but the *shape*: if higher complexity doesn't take longer, or
- * higher priority doesn't move faster, the labels aren't tracking reality —
- * this table exists to make that visible instead of trusting the tags at
- * face value. */
-/** Every non-Triagem column, across all buckets — the boundary "Backlog"
- * starts at, used to measure Backlog-to-Concluído without Triagem time
- * baked in. */
-function nonTriageColumnsOf(settings: AppSettings): Set<string> {
-  return new Set([
-    ...settings.queueColumnSet,
-    ...settings.developerColumnSet,
-    ...settings.userColumnSet,
-    ...settings.vendorColumnSet,
-    ...settings.generalColumnSet,
-  ]);
-}
-function backlogToDoneDays(m: ItemMetric, nonTriageColumns: Set<string>): number {
-  const start = m.item.firstEnteredColumn(nonTriageColumns) ?? m.item.createdDate;
-  const end = m.endDate ?? new Date();
-  return (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
 }
 
 function ComplexityPriorityCrossTable({
@@ -1489,278 +1384,6 @@ function crossTdStyle(): React.CSSProperties {
   };
 }
 
-type LabelDimension = 'complexity' | 'priority';
-
-interface LabelDeviationRow {
-  name: string;
-  label: string;
-  count: number;
-  personAvgDays: number;
-  teamAvgDays: number;
-  deviationDays: number;
-  metrics: ItemMetric[];
-}
-
-/** Same idea as the cross table above, one level deeper: for each
- * responsible + label (complexidade or prioridade) with enough completed
- * items of their own, compares their average Backlog-to-Concluído time
- * against the team's average for that same label — a big deviation means
- * that person's cards under that label aren't behaving like the rest of the
- * team's cards under it, which is what "etiquetando errado" would look like
- * in the data. Requires `minSample` items *for that person, in that label*
- * before showing a row at all — below that, the number is closer to noise
- * than signal, and flagging someone off of 1-2 cards isn't fair. */
-function LabelConsistencyTable({
-  metrics,
-  settings,
-  dimension,
-  minSample,
-  onSelect,
-}: {
-  metrics: ItemMetric[];
-  settings: AppSettings;
-  dimension: LabelDimension;
-  minSample: number;
-  onSelect: (label: string, metrics: ItemMetric[]) => void;
-}) {
-  const nonTriageColumns = nonTriageColumnsOf(settings);
-  const labelOf = dimension === 'complexity' ? complexityLabelOf : priorityLabelOf;
-  const days = (m: ItemMetric) => backlogToDoneDays(m, nonTriageColumns);
-
-  const byLabel = new Map<string, ItemMetric[]>();
-  for (const m of metrics) {
-    const label = labelOf(m);
-    if (label.startsWith('Sem ')) continue;
-    if (!byLabel.has(label)) byLabel.set(label, []);
-    byLabel.get(label)!.push(m);
-  }
-  const teamAvgByLabel = new Map<string, number>();
-  for (const [label, list] of byLabel.entries()) {
-    teamAvgByLabel.set(label, list.reduce((s, m) => s + days(m), 0) / list.length);
-  }
-
-  // Additive, same rule as the rest of the app (isAttributedTo): a card
-  // always counts for whoever it's literally assigned to, and *also* counts
-  // for settings.myDisplayName when it's tagged for him but assigned to
-  // someone else — once it's done, or currently in Desenvolvedor. Without
-  // this, work he's effectively driving through someone else's account
-  // would never show up under his own consistency numbers.
-  //
-  // But the *time* counted differs by how it's attributed: for a card
-  // literally assigned to them, the full Backlog-to-Concluído span is
-  // theirs. For a card only tag-attributed, they were never on the hook for
-  // Triagem/Fila/Usuário/Fornecedor on someone else's card — only for the
-  // Desenvolvimento stretch, whatever the tag actually credits — so it's
-  // cycleTimeDays instead, or the whole span would inflate their number
-  // with time they had no part in.
-  const tagOwner = settings.myDisplayName.trim();
-  const byPersonLabel = new Map<string, { metric: ItemMetric; viaTag: boolean }[]>();
-  for (const m of metrics) {
-    const label = labelOf(m);
-    if (label.startsWith('Sem ')) continue;
-    const name = m.item.assignedTo.trim();
-    if (name === '') continue;
-    const key = `${name}|${label}`;
-    if (!byPersonLabel.has(key)) byPersonLabel.set(key, []);
-    byPersonLabel.get(key)!.push({ metric: m, viaTag: false });
-    if (tagOwner !== '' && name.toLowerCase() !== tagOwner.toLowerCase() && isAttributedTo(m, tagOwner, settings)) {
-      const tagKey = `${tagOwner}|${label}`;
-      if (!byPersonLabel.has(tagKey)) byPersonLabel.set(tagKey, []);
-      byPersonLabel.get(tagKey)!.push({ metric: m, viaTag: true });
-    }
-  }
-
-  const rows: LabelDeviationRow[] = [];
-  for (const [key, entries] of byPersonLabel.entries()) {
-    if (entries.length < minSample) continue;
-    const [name, label] = key.split('|');
-    const teamAvg = teamAvgByLabel.get(label);
-    if (teamAvg == null) continue;
-    const personAvg = entries.reduce((s, e) => s + (e.viaTag ? e.metric.cycleTimeDays : days(e.metric)), 0) / entries.length;
-    rows.push({
-      name,
-      label,
-      count: entries.length,
-      personAvgDays: personAvg,
-      teamAvgDays: teamAvg,
-      deviationDays: personAvg - teamAvg,
-      metrics: entries.map((e) => e.metric),
-    });
-  }
-  // Grouped by person first (ranked by that person's worst deviation, so
-  // whoever's most off the team's pace still floats to the top) rather than
-  // sorted purely by deviation size — otherwise the same person's rows for
-  // complexidade/prioridade scatter across the table, which reads as more
-  // people having an issue than actually do.
-  const worstDeviationByName = new Map<string, number>();
-  for (const r of rows) {
-    const current = worstDeviationByName.get(r.name) ?? 0;
-    if (Math.abs(r.deviationDays) > Math.abs(current)) worstDeviationByName.set(r.name, r.deviationDays);
-  }
-  rows.sort((a, b) => {
-    if (a.name !== b.name) return Math.abs(worstDeviationByName.get(b.name)!) - Math.abs(worstDeviationByName.get(a.name)!);
-    return Math.abs(b.deviationDays) - Math.abs(a.deviationDays);
-  });
-
-  if (rows.length === 0) {
-    return (
-      <div style={{ ...cardStyle(), color: '#64748B', fontSize: 13 }}>
-        Ninguém tem itens suficientes (mínimo {minSample}) numa mesma etiqueta pra comparar ainda.
-      </div>
-    );
-  }
-
-  return (
-    <TableCard isEmpty={false} emptyMessage="">
-      <table style={tableStyle()}>
-        <thead>
-          <tr>
-            <Th>Responsável</Th>
-            <Th>Etiqueta</Th>
-            <Th>Itens dele</Th>
-            <Th>Média dele</Th>
-            <Th>Média do time</Th>
-            <Th>Desvio</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={`${r.name}|${r.label}`} style={{ cursor: 'pointer' }} onClick={() => onSelect(`${r.name} · ${r.label}`, r.metrics)}>
-              <Td>
-                <ResponsibleTag name={r.name} />
-              </Td>
-              <Td>{r.label}</Td>
-              <Td>{r.count}</Td>
-              <Td>{r.personAvgDays.toFixed(1)}d</Td>
-              <Td>{r.teamAvgDays.toFixed(1)}d</Td>
-              <Td>
-                <span style={{ fontWeight: 700, color: r.deviationDays > 0 ? BrandColors.danger : BrandColors.user }}>
-                  {r.deviationDays > 0 ? '+' : ''}
-                  {r.deviationDays.toFixed(1)}d
-                </span>
-              </Td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </TableCard>
-  );
-}
-
-/** Sums exactly the stage-day getters whose Ranking de performance chip is
- * marked (Triagem/Fila/Desenvolvedor/Usuário/Fornecedor/Geral) — same chips,
- * same meaning: "Cycle Time" here isn't fixed to Desenvolvimento alone, it's
- * whatever mix of stages the team currently wants counted as real elapsed
- * work, same denominator the Base above already uses for open items. */
-function stageDaysSelected(m: ItemMetric, selectedGroups: Set<string>): number {
-  let total = 0;
-  if (selectedGroups.has('triagem')) total += m.triageDays;
-  if (selectedGroups.has('fila')) total += m.queueDays;
-  if (selectedGroups.has('desenvolvedor')) total += m.cycleTimeDays;
-  if (selectedGroups.has('usuario')) total += m.userDays;
-  if (selectedGroups.has('fornecedor')) total += m.vendorDays;
-  if (selectedGroups.has('geral')) total += m.generalDays;
-  return total;
-}
-
-/** Per-responsible Cycle Time (sum of the stages selected via the chips
- * above) against the team's average — plus two fixed reference columns
- * (Dados, Sustentação) so any row can be read against whichever area's
- * benchmark is actually relevant to that person, not just the team-wide
- * blend; either shows "—" when nobody on the team has a completed item in
- * that area at all. Same additive tag rule as everywhere else: a card
- * tag-attributed to settings.myDisplayName also counts for him — but only
- * for the Desenvolvedor stretch (cycleTimeDays), whatever the chips say,
- * since that's the one stage the tag actually credits on someone else's
- * card; counting the rest of their stages too would inflate him with time
- * he had no part in. Requires `minSample` completed items before a person
- * gets a row at all. */
-function CycleTimeByAreaTable({
-  metrics,
-  settings,
-  selectedGroups,
-  minSample,
-  onSelect,
-}: {
-  metrics: ItemMetric[];
-  settings: AppSettings;
-  selectedGroups: Set<string>;
-  minSample: number;
-  onSelect: (name: string, metrics: ItemMetric[]) => void;
-}) {
-  const avg = (list: ItemMetric[]) => (list.length === 0 ? null : list.reduce((s, m) => s + stageDaysSelected(m, selectedGroups), 0) / list.length);
-  const teamAvg = avg(metrics) ?? 0;
-  const dadosAvg = avg(metrics.filter((m) => areaLeaf(m.item.areaPath) === 'Dados'));
-  const sustentacaoAvg = avg(metrics.filter((m) => areaLeaf(m.item.areaPath) === 'Sustentação'));
-
-  const tagOwner = settings.myDisplayName.trim();
-  const byPerson = new Map<string, { metric: ItemMetric; viaTag: boolean }[]>();
-  for (const m of metrics) {
-    const name = m.item.assignedTo.trim();
-    if (name === '') continue;
-    if (!byPerson.has(name)) byPerson.set(name, []);
-    byPerson.get(name)!.push({ metric: m, viaTag: false });
-    if (tagOwner !== '' && name.toLowerCase() !== tagOwner.toLowerCase() && isAttributedTo(m, tagOwner, settings)) {
-      if (!byPerson.has(tagOwner)) byPerson.set(tagOwner, []);
-      byPerson.get(tagOwner)!.push({ metric: m, viaTag: true });
-    }
-  }
-
-  const rows = [...byPerson.entries()]
-    .filter(([, entries]) => entries.length >= minSample)
-    .map(([name, entries]) => {
-      const personAvg = entries.reduce((s, e) => s + (e.viaTag ? e.metric.cycleTimeDays : stageDaysSelected(e.metric, selectedGroups)), 0) / entries.length;
-      return { name, count: entries.length, personAvg, deviation: personAvg - teamAvg, items: entries.map((e) => e.metric) };
-    })
-    .sort((a, b) => Math.abs(b.deviation) - Math.abs(a.deviation));
-
-  if (rows.length === 0) {
-    return (
-      <div style={{ ...cardStyle(), color: '#64748B', fontSize: 13 }}>
-        Ninguém com itens suficientes (mínimo {minSample}) pra comparar ainda.
-      </div>
-    );
-  }
-
-  return (
-    <TableCard isEmpty={false} emptyMessage="">
-      <table style={tableStyle()}>
-        <thead>
-          <tr>
-            <Th>Responsável</Th>
-            <Th>Itens</Th>
-            <Th>Cycle Time dele</Th>
-            <Th>Cycle Time equipe</Th>
-            <Th>Desvio</Th>
-            <Th>Cycle Time Dados</Th>
-            <Th>Cycle Time Sustentação</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.name} style={{ cursor: 'pointer' }} onClick={() => onSelect(r.name, r.items)}>
-              <Td>
-                <ResponsibleTag name={r.name} />
-              </Td>
-              <Td>{r.count}</Td>
-              <Td>{r.personAvg.toFixed(1)}d</Td>
-              <Td>{teamAvg.toFixed(1)}d</Td>
-              <Td>
-                <span style={{ fontWeight: 700, color: r.deviation > 0 ? BrandColors.danger : BrandColors.user }}>
-                  {r.deviation > 0 ? '+' : ''}
-                  {r.deviation.toFixed(1)}d
-                </span>
-              </Td>
-              <Td>{dadosAvg == null ? '—' : `${dadosAvg.toFixed(1)}d`}</Td>
-              <Td>{sustentacaoAvg == null ? '—' : `${sustentacaoAvg.toFixed(1)}d`}</Td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </TableCard>
-  );
-}
-
 function SectionHeader({ icon, iconColor, title, subtitle }: { icon: ReactNode; iconColor: string; title: string; subtitle?: string }) {
   return (
     <div style={{ display: 'flex', alignItems: 'flex-start' }}>
@@ -1858,7 +1481,7 @@ function CompactAreaTile({
           <CompactStat value={`${stats.stillOpen}`} label="Saída" />
         </div>
         <div style={{ flex: 1 }}>
-          <CompactStat value={stats.generalDays == null ? '—' : `${stats.generalDays.toFixed(1)}d`} label="Cycle Time" />
+          <CompactStat value={stats.cycleDays == null ? '—' : `${stats.cycleDays.toFixed(1)}d`} label="Cycle Time" />
         </div>
       </div>
       <div style={{ height: 8 }} />
@@ -1881,6 +1504,7 @@ function ComparisonPanel({
   groups,
   byGroup,
   sprint,
+  triageColumns,
   onTileClick,
   initialCount = 6,
 }: {
@@ -1890,6 +1514,7 @@ function ComparisonPanel({
   groups: string[];
   byGroup: Map<string, ItemMetric[]>;
   sprint: Sprint | null;
+  triageColumns: Set<string>;
   onTileClick: (label: string, metrics: ItemMetric[]) => void;
   initialCount?: number;
 }) {
@@ -1907,9 +1532,21 @@ function ComparisonPanel({
       </div>
       <div style={{ height: 16 }} />
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14 }}>
-        <CompactAreaTile label={allLabel} stats={computeAreaStats(allMetrics, sprint)} metrics={allMetrics} highlighted onClick={() => onTileClick(allLabel, allMetrics)} />
+        <CompactAreaTile
+          label={allLabel}
+          stats={computeAreaStats(allMetrics, sprint, triageColumns)}
+          metrics={allMetrics}
+          highlighted
+          onClick={() => onTileClick(allLabel, allMetrics)}
+        />
         {shown.map(([group, metrics]) => (
-          <CompactAreaTile key={group} label={group} stats={computeAreaStats(metrics, sprint)} metrics={metrics} onClick={() => onTileClick(group, metrics)} />
+          <CompactAreaTile
+            key={group}
+            label={group}
+            stats={computeAreaStats(metrics, sprint, triageColumns)}
+            metrics={metrics}
+            onClick={() => onTileClick(group, metrics)}
+          />
         ))}
       </div>
       {(hiddenCount > 0 || expanded) && ranked.length > initialCount && (
@@ -1936,18 +1573,20 @@ function GroupCountTable({
   groups,
   byGroup,
   sprint,
+  triageColumns,
   onRowClick,
 }: {
   title: string;
   groups: string[];
   byGroup: Map<string, ItemMetric[]>;
   sprint: Sprint | null;
+  triageColumns: Set<string>;
   onRowClick: (label: string, metrics: ItemMetric[]) => void;
 }) {
   const ranked = groups.map((g): [string, ItemMetric[]] => [g, byGroup.get(g) ?? []]).sort((a, b) => b[1].length - a[1].length);
 
   const Row = ({ label, metrics }: { label: string; metrics: ItemMetric[] }) => {
-    const stats = computeAreaStats(metrics, sprint);
+    const stats = computeAreaStats(metrics, sprint, triageColumns);
     return (
       <tr onClick={() => onRowClick(label, metrics)} style={{ cursor: 'pointer' }}>
         <Td>
@@ -2099,14 +1738,17 @@ function Modal({ title, width, onClose, children }: { title: string; width: numb
 function ResponsibleBreakdownDialog({
   label,
   metrics,
+  statusOf,
   onClose,
   onSelectPerson,
 }: {
   label: string;
   metrics: ItemMetric[];
+  statusOf?: (m: ItemMetric) => boolean;
   onClose: () => void;
   onSelectPerson: (name: string, metrics: ItemMetric[]) => void;
 }) {
+  const isDone = statusOf ?? ((m: ItemMetric) => m.done);
   const byName = groupBy(metrics, (m) => m.item.assignedTo.trim());
   byName.delete('');
   const rows = [...byName.entries()].sort((a, b) => b[1].length - a[1].length);
@@ -2125,7 +1767,7 @@ function ResponsibleBreakdownDialog({
               <ResponsibleTag name={name} />
             </div>
             <span style={{ fontWeight: 'bold' }}>
-              {list.filter((m) => m.done).length}/{list.length}
+              {list.filter(isDone).length}/{list.length}
             </span>
           </div>
         ))
@@ -2148,6 +1790,8 @@ function PersonItemsDialog({
   extraColumn,
   sortMode = 'doneFirst',
   projectOf,
+  statusOf,
+  columnOf,
   onClose,
 }: {
   name: string;
@@ -2160,10 +1804,23 @@ function PersonItemsDialog({
   // Resolves an item to the Feature it's a child of, if any — only WIP
   // passes this today.
   projectOf?: (m: ItemMetric) => WorkItem | null;
+  // Whether to treat `m` as done for display/sort — defaults to `m.done`
+  // (live status). Callers scoped to a past sprint pass a sprint-cutoff-aware
+  // check instead, so a card only closed in a later sprint still reads as
+  // "Aberto" here, matching how it was bucketed into this list.
+  statusOf?: (m: ItemMetric) => boolean;
+  // Which board column to show — defaults to `currentBoardColumn` (live).
+  // Callers scoped to a past sprint pass `m.item.boardColumnAsOf(cutoff)`
+  // instead, so a card that kept moving after that sprint (e.g. all the way
+  // to "Concluído" later) shows the column it actually died in back then,
+  // not today's.
+  columnOf?: (m: ItemMetric) => string;
   onClose: () => void;
 }) {
+  const isDone = statusOf ?? ((m: ItemMetric) => m.done);
+  const columnFor = columnOf ?? ((m: ItemMetric) => m.item.currentBoardColumn);
   const rows = [...metrics].sort((a, b) =>
-    sortMode === 'createdAsc' ? a.item.createdDate.getTime() - b.item.createdDate.getTime() : a.done === b.done ? 0 : a.done ? 1 : -1,
+    sortMode === 'createdAsc' ? a.item.createdDate.getTime() - b.item.createdDate.getTime() : isDone(a) === isDone(b) ? 0 : isDone(a) ? 1 : -1,
   );
   // Whether this item landed under `name` because it's literally assigned
   // to them, or via the tag-credit rule (assigned to someone else, counted
@@ -2191,7 +1848,7 @@ function PersonItemsDialog({
               <Th>Título</Th>
               <Th>Coluna</Th>
               <Th>Status</Th>
-              <Th>Criado em</Th>
+              <Th>Concluído em</Th>
               {showTags && <Th>Tags</Th>}
               {showAttribution && <Th>Atribuição</Th>}
               {projectOf && <Th>Projeto</Th>}
@@ -2207,9 +1864,9 @@ function PersonItemsDialog({
                   <Td>
                     <span style={{ display: 'inline-block', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.item.title}</span>
                   </Td>
-                  <Td>{m.item.currentBoardColumn === '' ? '—' : m.item.currentBoardColumn}</Td>
-                  <Td>{m.done ? 'Concluído' : 'Aberto'}</Td>
-                  <Td>{formatDate(m.item.createdDate)}</Td>
+                  <Td>{columnFor(m) === '' ? '—' : columnFor(m)}</Td>
+                  <Td>{isDone(m) ? 'Concluído' : 'Aberto'}</Td>
+                  <Td>{isDone(m) && m.endDate ? formatDateTime(m.endDate) : '—'}</Td>
                   {showTags && (
                     <Td>
                       <TagChips tags={m.item.tags} />
@@ -2353,11 +2010,52 @@ function PerformanceItemsDialog({ row, onClose }: { row: ResponsiblePerformance;
   );
 }
 
+/** "WIP Total" — a live headcount of open items by literal board column,
+ * ordered along the pipeline (Triagem -> Backlog -> resto do Geral -> Fila
+ * -> Desenvolvedor -> Fornecedor -> Usuário) so the bars read the same
+ * left-to-right order a card actually flows through the board. Columns with
+ * zero open items right now still get a bar (0), rather than disappearing —
+ * an empty queue is exactly as informative as a full one. */
+function WipByColumnChart({ data }: { data: { name: string; count: number }[] }) {
+  const total = data.reduce((s, d) => s + d.count, 0);
+  const maxCount = Math.max(1, ...data.map((d) => d.count));
+  return (
+    <div style={cardStyle()}>
+      <div style={{ fontSize: 11, fontWeight: 'bold', letterSpacing: 0.6, color: '#94A3B8' }}>WIP TOTAL</div>
+      <div style={{ fontSize: 32, fontWeight: 'bold', color: BrandColors.developer }}>{total}</div>
+      <div style={{ height: 12 }} />
+      {data.length === 0 ? (
+        <div style={{ height: 220, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748B', fontSize: 13 }}>
+          Nenhuma coluna configurada.
+        </div>
+      ) : (
+        <div style={{ height: 260 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={data}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="name" tick={{ fontSize: 10 }} interval={0} angle={-15} textAnchor="end" height={50} />
+              <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
+              <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+                {data.map((d, i) => (
+                  <Cell key={i} fillOpacity={0.35 + 0.65 * (d.count / maxCount)} fill={BrandColors.developer} />
+                ))}
+                <LabelList dataKey="count" position="top" style={{ fontSize: 12, fontWeight: 'bold', fill: '#334155' }} />
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** WIP leaderboard — most itens em aberto first, since that's the actual
  * overload signal ("bolas no ar"), not accumulated days (a handful of very
- * old cards reads differently from a dozen fresh ones). Dias acumulados is
- * shown alongside for context, not as the sort key. */
-function WipTable({ rows, onRowClick }: { rows: WaitRanking[]; onRowClick: (name: string, items: ItemMetric[]) => void }) {
+ * old cards reads differently from a dozen fresh ones). Aging médio e maior
+ * aging são mostrados ao lado pra contexto, não como critério de ordenação:
+ * "tem X itens na mão de fulano, com uma média de Y dias, sendo que o mais
+ * antigo tem Z dias". */
+function WipTable({ rows, onRowClick }: { rows: WipRankingRow[]; onRowClick: (name: string, items: ItemMetric[]) => void }) {
   return (
     <TableCard isEmpty={rows.length === 0} emptyMessage="Ninguém com itens em aberto.">
       <table style={tableStyle()}>
@@ -2366,7 +2064,8 @@ function WipTable({ rows, onRowClick }: { rows: WaitRanking[]; onRowClick: (name
             <Th>#</Th>
             <Th>Responsável</Th>
             <Th>Itens em aberto</Th>
-            <Th>Dias acumulados</Th>
+            <Th>Aging médio</Th>
+            <Th>Maior aging</Th>
           </tr>
         </thead>
         <tbody>
@@ -2379,7 +2078,8 @@ function WipTable({ rows, onRowClick }: { rows: WaitRanking[]; onRowClick: (name
               <Td>
                 <span style={{ fontWeight: 'bold' }}>{r.count}</span>
               </Td>
-              <Td>{r.totalDays.toFixed(0)}d</Td>
+              <Td>{formatDuration(r.avgAgingDays)}</Td>
+              <Td>{formatDuration(r.maxAgingDays)}</Td>
             </tr>
           ))}
         </tbody>
@@ -2548,7 +2248,7 @@ function TagRankingTable({ rows, onRowClick }: { rows: TagRankingRow[]; onRowCli
             <Th>Entraram</Th>
             <Th>Concluídos</Th>
             <Th>Conversão</Th>
-            <Th>Cycle Time Desenvolvimento</Th>
+            <Th>Tempo de Desenvolvimento</Th>
             <Th>Cycle Time Fila</Th>
           </tr>
         </thead>
@@ -2620,14 +2320,14 @@ function TagRaioXDialog({ row, onClose }: { row: TagRankingRow; onClose: () => v
         </div>
         <div>
           <div style={{ fontWeight: 'bold', fontSize: 14 }}>
-            Cycle Time Desenvolvimento — {row.devAvg == null ? '—' : `${row.devAvg.toFixed(1)}d`}
+            Tempo de Desenvolvimento — {row.devAvg == null ? '—' : `${row.devAvg.toFixed(1)}d`}
             {row.name === 'DH' && <span style={{ fontWeight: 400, color: '#94A3B8' }}> (inclui tempo em Fornecedor)</span>}
           </div>
           <div style={{ height: 8 }} />
           {row.devItems.length === 0 ? (
             <span style={{ fontSize: 13, color: '#64748B' }}>Nenhum item com tempo mensurável.</span>
           ) : (
-            <MiniTable items={row.devItems} note={(m) => `${row.devDaysOf(m).toFixed(1)}d`} />
+            <MiniTable items={row.devItems} note={(m) => formatDuration(row.devDaysOf(m))} />
           )}
         </div>
         <div>
@@ -2636,7 +2336,7 @@ function TagRaioXDialog({ row, onClose }: { row: TagRankingRow; onClose: () => v
           {row.queueItems.length === 0 ? (
             <span style={{ fontSize: 13, color: '#64748B' }}>Nenhum item com tempo mensurável.</span>
           ) : (
-            <MiniTable items={row.queueItems} note={(m) => `${m.queueDays.toFixed(1)}d`} />
+            <MiniTable items={row.queueItems} note={(m) => `${formatDuration(m.queueDays)}`} />
           )}
         </div>
       </div>
@@ -2783,9 +2483,9 @@ function HealthScoreDetailDialog({ row, onClose }: { row: HealthScoreRanking; on
                     {suspicious ? (
                       <ScoreBadge label="Suspeito — não conta" tone="bad" />
                     ) : fast ? (
-                      <ScoreBadge label={`Rápido (${(row.speedStage === 'desenvolvimento' ? m.cycleTimeDays : m.generalDays).toFixed(1)}d) — conta`} tone="good" />
+                      <ScoreBadge label={`Rápido (${formatDuration(row.speedStage === 'desenvolvimento' ? m.cycleTimeDays : m.generalDays)}) — conta`} tone="good" />
                     ) : (
-                      <ScoreBadge label={`Não rápido (${(row.speedStage === 'desenvolvimento' ? m.cycleTimeDays : m.generalDays).toFixed(1)}d)`} tone="neutral" />
+                      <ScoreBadge label={`Não rápido (${formatDuration(row.speedStage === 'desenvolvimento' ? m.cycleTimeDays : m.generalDays)})`} tone="neutral" />
                     )}
                   </Td>
                 </tr>
@@ -2946,7 +2646,7 @@ function ItemListTable({ metrics, valueLabel, valueSelector }: { metrics: ItemMe
                 <TagChips tags={m.item.tags} />
               </Td>
               <Td>{formatDate(m.item.createdDate)}</Td>
-              <Td>{valueSelector(m).toFixed(1)} dias</Td>
+              <Td>{formatDuration(valueSelector(m))}</Td>
             </tr>
           ))}
         </tbody>

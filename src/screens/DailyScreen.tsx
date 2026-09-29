@@ -59,8 +59,32 @@ function daysUntil(target: Date): number {
   return (target.getTime() - Date.now()) / MS_PER_DAY;
 }
 
+// Survives the browser reloading this tab (Chrome discarding a backgrounded
+// tab) — without this, coming back to the tab resets the dropdown back to
+// "Selecione um responsável..." even though one was already picked.
+const DAILY_PERSON_STORAGE_KEY = 'daily:selectedName';
+function readStoredDailyName(): string {
+  try {
+    return sessionStorage.getItem(DAILY_PERSON_STORAGE_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+function storeDailyName(name: string): void {
+  try {
+    if (name === '') sessionStorage.removeItem(DAILY_PERSON_STORAGE_KEY);
+    else sessionStorage.setItem(DAILY_PERSON_STORAGE_KEY, name);
+  } catch {
+    // Ignore — losing this just means the dropdown resets on reload.
+  }
+}
+
 export function DailyScreen({ settings, items: rawItems, loading, error }: { settings: AppSettings; items: WorkItem[]; loading: boolean; error: string | null }) {
-  const [selectedName, setSelectedName] = useState<string>('');
+  const [selectedName, setSelectedNameState] = useState<string>(readStoredDailyName);
+  function setSelectedName(name: string) {
+    setSelectedNameState(name);
+    storeDailyName(name);
+  }
 
   // Removed / abandoned items (see WorkItem.isCancelled) never got delivered
   // and are excluded everywhere else in the app — without this they'd sit

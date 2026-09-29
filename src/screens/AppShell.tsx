@@ -5,6 +5,7 @@ import { AzureDevOpsService } from '../services/azureDevOpsService';
 import { AppSettings } from '../services/settingsService';
 import { SupabaseConfigService } from '../services/supabaseConfigService';
 import { CardRating, CardRatingService } from '../services/cardRatingService';
+import { loadWorkItemCache, saveWorkItemCache } from '../services/workItemCache';
 import type { AppUser } from '../services/authService';
 import { Sprint, SprintService } from '../services/sprintService';
 import { BrandColors } from '../theme';
@@ -25,6 +26,26 @@ const configService = new SupabaseConfigService();
 const sprintService = new SprintService();
 const cardRatingService = new CardRatingService();
 
+const DESTINATIONS: Destination[] = ['dashboard', 'team', 'daily', 'users', 'history', 'sla', 'projects', 'settings'];
+const DESTINATION_STORAGE_KEY = 'appShell:destination';
+
+// Which tab was open, so it survives the tab getting reloaded (Chrome's
+// Memory Saver discarding a backgrounded tab is the common case) instead of
+// silently dropping you back on Dashboard every time you switch away and
+// back. `isAdmin` gets checked again here, not just in selectDestination —
+// a stored destination from a previous admin session should never leak
+// through for a "responsável" login on the same browser.
+function loadStoredDestination(isAdmin: boolean): Destination {
+  if (!isAdmin) return 'dashboard';
+  try {
+    const stored = sessionStorage.getItem(DESTINATION_STORAGE_KEY);
+    if (stored != null && (DESTINATIONS as string[]).includes(stored)) return stored as Destination;
+  } catch {
+    // sessionStorage unavailable — fall through to the default.
+  }
+  return 'dashboard';
+}
+
 /** App-wide shell: owns the settings/data state and renders a persistent
  * sidebar. `appUser` (resolved by AuthGate before this ever mounts) decides
  * what's visible: a "responsavel" login only ever sees Dashboard, locked to
@@ -38,7 +59,7 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
   const [error, setError] = useState<string | null>(null);
   const [items, setItems] = useState<WorkItem[]>([]);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const [destination, setDestination] = useState<Destination>('dashboard');
+  const [destination, setDestination] = useState<Destination>(() => loadStoredDestination(appUser.role === 'admin'));
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const sprints = useRef<Sprint[]>(sprintService.recentSprints());
   const [selectedSprint, setSelectedSprint] = useState<Sprint | null>(
@@ -90,19 +111,6 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
     }
   }
 
-  async function saveRating(init: {
-    workItemId: number;
-    ratedBy: string;
-    department: string;
-    requesterName: string;
-    itemTitle: string;
-    stars: number;
-    comment: string;
-  }) {
-    await cardRatingService.save(init);
-    await refreshRatings();
-  }
-
   useEffect(() => {
     refreshRatings();
   }, []);
@@ -125,12 +133,36 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
       setSettings(loaded);
       setSettingsLoaded(true);
       if (loaded.isConfigured) {
-        // kick off first refresh
-        refresh(loaded);
+        // Reload from sessionStorage before hitting the API — survives the
+        // browser reloading this tab (Chrome discarding it in the
+        // background is the common case), which otherwise wipes this
+        // rolling-window cache and forces a full re-fetch on every tab
+        // switch, defeating the whole point of caching it.
+        const cached = loadWorkItemCache(loaded.organization, loaded.project);
+        if (cached != null) {
+          setItems(cached.items);
+          setCachedFromSprintNumber(cached.fromSprintNumber);
+          setLastUpdated(cached.lastUpdated);
+        } else {
+          refresh(loaded);
+        }
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Restored a Histórico/SLA destination from sessionStorage on a fresh
+  // reload — that data load normally only kicks off inside selectDestination
+  // when the nav item is clicked, so a page that opens straight into one of
+  // those tabs needs it triggered here instead, once `settings` has
+  // actually loaded (not the stale unconfigured default from this render).
+  useEffect(() => {
+    if (!settingsLoaded || !settings.isConfigured) return;
+    if ((destination === 'history' || destination === 'sla') && historyItems == null) {
+      loadHistory();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsLoaded]);
 
   /** How many sprints back the Dashboard keeps warm without asking the API
    * again — matches the size of the dropdown's usual browsing range. */
@@ -154,9 +186,11 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
       const fetched = await service.fetchMyWorkItems({
         changedSince: sprintService.sprintFor(targetFrom).start,
       });
+      const now = new Date();
       setItems(fetched);
       setCachedFromSprintNumber(targetFrom);
-      setLastUpdated(new Date());
+      setLastUpdated(now);
+      saveWorkItemCache(s.organization, s.project, { items: fetched, fromSprintNumber: targetFrom, lastUpdated: now });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -235,6 +269,11 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
     // non-admin, but this keeps a stray/forged call from switching tabs too.
     if (!isAdmin && d !== 'dashboard') return;
     setDestination(d);
+    try {
+      sessionStorage.setItem(DESTINATION_STORAGE_KEY, d);
+    } catch {
+      // Ignore — losing this is just "back to Dashboard on reload", not fatal.
+    }
     if ((d === 'history' || d === 'sla') && historyItems == null) {
       loadHistory();
     }
@@ -265,7 +304,7 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center' }}>
-          {isNarrow && (
+          {isNarrow && isAdmin && (
             <button
               onClick={() => setDrawerOpen(true)}
               aria-label="menu"
@@ -276,7 +315,7 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
           )}
         </div>
         <img src={abapinhoLogo} alt="Conta com o Diguidas" style={{ height: 32, objectFit: 'contain' }} />
-        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 12 }}>
           <button
             onClick={() => refresh()}
             disabled={loading}
@@ -299,10 +338,15 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
             <RefreshCw size={16} strokeWidth={2} />
             {!isNarrow && 'Atualizar'}
           </button>
+          {/* A responsável only ever has the Dashboard tab, so there's nothing
+             to navigate — no sidebar/drawer for them. Their account card and
+             the Pole Tech badge (otherwise only in the sidebar footer) move
+             up here instead, so they're not lost along with the nav. */}
+          {!isAdmin && <UserBadge appUser={appUser} settings={settings} onSignOut={onSignOut} />}
         </div>
       </header>
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-        {!isNarrow && (
+        {!isNarrow && isAdmin && (
           <>
             <Sidebar
               settings={settings}
@@ -315,7 +359,7 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
             />
           </>
         )}
-        {isNarrow && drawerOpen && (
+        {isNarrow && isAdmin && drawerOpen && (
           <div
             style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.3)', zIndex: 10 }}
             onClick={() => setDrawerOpen(false)}
@@ -347,8 +391,6 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
               onRefresh={() => refresh()}
               onSprintChanged={onSprintChanged}
               lockedResponsible={isAdmin ? undefined : (appUser.responsavelName ?? undefined)}
-              ratings={ratings}
-              onSaveRating={saveRating}
             />
           )}
           {destination === 'projects' && (
@@ -371,7 +413,6 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
               sprints={sprints.current}
               onSprintChanged={onSprintChanged}
               onTabChange={() => contentRef.current?.scrollTo(0, 0)}
-              ratings={ratings}
               ratingsLoading={ratingsLoading}
             />
           )}
@@ -431,6 +472,128 @@ function shortName(name: string): string {
   const parts = name.trim().split(/\s+/).filter((p) => p.length > 0);
   if (parts.length <= 2) return name;
   return `${parts[0]} ${parts[parts.length - 1][0]}. ${parts[parts.length - 1]}`;
+}
+
+/** Compact header-level stand-in for the sidebar's account card, shown to a
+ * responsável instead of the full Sidebar (which they'd otherwise see with
+ * just a single "Dashboard" item, centered and looking broken). Carries the
+ * same info the admin gets in the sidebar: avatar, name, role, sign out, and
+ * the Pole Tech badge. */
+function UserBadge({
+  appUser,
+  settings,
+  onSignOut,
+}: {
+  appUser: AppUser;
+  settings: AppSettings;
+  onSignOut: () => void;
+}) {
+  const displayName = appUser.responsavelName ?? settings.myDisplayName;
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ position: 'relative' }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        title={displayName}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '4px 10px 4px 4px',
+          borderRadius: 999,
+          border: `1px solid ${BrandColors.border}`,
+          backgroundColor: '#fff',
+          cursor: 'pointer',
+        }}
+      >
+        <div
+          style={{
+            width: 28,
+            height: 28,
+            borderRadius: '50%',
+            backgroundColor: BrandColors.primaryLightBg,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontWeight: 700,
+            color: BrandColors.primaryDark,
+            fontSize: 11.5,
+            flexShrink: 0,
+          }}
+        >
+          {initials(displayName)}
+        </div>
+        <span style={{ fontSize: 13, fontWeight: 600, color: '#334155' }}>{shortName(displayName)}</span>
+      </button>
+      {open && (
+        <>
+          <div style={{ position: 'fixed', inset: 0, zIndex: 19 }} onClick={() => setOpen(false)} />
+          <div
+            style={{
+              position: 'absolute',
+              right: 0,
+              top: '100%',
+              marginTop: 8,
+              width: 200,
+              backgroundColor: '#FFFFFF',
+              borderRadius: 12,
+              border: `1px solid ${BrandColors.border}`,
+              boxShadow: '0 4px 16px rgba(15, 23, 42, 0.12)',
+              zIndex: 20,
+              overflow: 'hidden',
+            }}
+          >
+            <div style={{ padding: '10px 14px', borderBottom: `1px solid ${BrandColors.border}` }}>
+              <div
+                style={{ fontWeight: 600, fontSize: 13, color: '#1E293B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                title={appUser.email}
+              >
+                {shortName(displayName)}
+              </div>
+              <div style={{ fontSize: 11, color: '#94A3B8', fontWeight: 500 }}>Responsável</div>
+            </div>
+            <button
+              onClick={() => {
+                setOpen(false);
+                onSignOut();
+              }}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '10px 14px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: BrandColors.danger,
+                fontSize: 13,
+                fontWeight: 600,
+                textAlign: 'left',
+              }}
+            >
+              <LogOut size={14} strokeWidth={2} />
+              Sair
+            </button>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 6,
+                padding: '8px 14px',
+                borderTop: `1px solid ${BrandColors.border}`,
+                backgroundColor: '#FAFBFC',
+              }}
+            >
+              <span style={{ fontSize: 10, color: '#B0B9C6', letterSpacing: 0.3 }}>desenvolvido por</span>
+              <img src={poletechBadge} alt="Pole Tech" style={{ height: 16, objectFit: 'contain', opacity: 0.85 }} />
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 function Sidebar({
@@ -494,7 +657,7 @@ function Sidebar({
           </button>
         </div>
       )}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'flex-start', paddingTop: 12 }}>
         <NavItem icon={<Home size={16} strokeWidth={2} />} label="Dashboard" selected={destination === 'dashboard'} onClick={() => onSelect('dashboard')} collapsed={collapsed} />
         {isAdmin && (
           <>
