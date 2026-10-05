@@ -129,7 +129,7 @@ export function SlaScreen({
     return stats;
   }
 
-  /** Cycle time geral: full lead time (criação -> conclusão) for items
+  /** Lead time: full lead time (criação -> conclusão) for items
    * finished within the selected window, scoped to the chosen responsible
    * (or the whole team when none is picked). */
   function computeCycleTime(list: WorkItem[]): [number | null, ItemMetric[]] {
@@ -343,7 +343,7 @@ function FiltersRow({
       {types.length > 0 && (
         <>
           <div style={{ height: 12 }} />
-          <FilterBox message='Tipos de demanda: desmarque um tipo pra ele sair da conta de tempo por coluna e do Cycle Time (ex: ignore Incidente pra olhar só o SLA de Projeto).'>
+          <FilterBox message='Tipos de demanda: desmarque um tipo pra ele sair da conta de tempo por coluna e do Lead time (ex: ignore Incidente pra olhar só o SLA de Projeto).'>
             {types.map((type) => (
               <ToggleChip key={type} label={type} selected={selectedTypes == null || selectedTypes.has(type)} onSelected={(selected) => onTypeToggled(type, selected)} />
             ))}
@@ -354,7 +354,7 @@ function FiltersRow({
   );
 }
 
-/** Headline Cycle Time (Geral) for the chosen window and scope — full lead
+/** Headline Lead time for the chosen window and scope — full lead
  * time from creation to conclusion, averaged over items finished inside the
  * window. */
 function CycleTimeCard({
@@ -396,7 +396,7 @@ function CycleTimeCard({
       </span>
       <div style={{ width: 16 }} />
       <div style={{ flex: 1 }}>
-        <div style={{ fontWeight: 'bold', fontSize: 16, color: BrandColors.primaryDark }}>Cycle Time (Geral)</div>
+        <div style={{ fontWeight: 'bold', fontSize: 16, color: BrandColors.primaryDark }}>Lead time</div>
         <div style={{ height: 2 }} />
         <div style={{ fontSize: 12, color: '#64748B' }}>
           {scopeLabel} · {periodLabel}
@@ -435,7 +435,7 @@ function CycleTimeItemsDialog({ metrics, onClose }: { metrics: ItemMetric[]; onC
     <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }} onClick={onClose}>
       <div style={{ backgroundColor: '#fff', borderRadius: 12, maxWidth: 560, width: '90%', maxHeight: '85vh', overflowY: 'auto', padding: 20 }} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: 'flex', alignItems: 'center' }}>
-          <span style={{ flex: 1, fontWeight: 'bold', fontSize: 16 }}>Cards no Cycle Time (Geral)</span>
+          <span style={{ flex: 1, fontWeight: 'bold', fontSize: 16 }}>Cards no Lead time</span>
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}>
             <X size={18} strokeWidth={2} />
           </button>

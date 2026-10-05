@@ -6,6 +6,13 @@ export function boardColumnMatches(columns: Set<string>, value: string): boolean
   return [...columns].some((c) => c.trim().toLowerCase() === normalized);
 }
 
+/** Last millisecond of the (local) day the given date falls on. */
+export function endOfDay(date: Date): Date {
+  const d = new Date(date.getTime());
+  d.setHours(23, 59, 59, 999);
+  return d;
+}
+
 export interface StateChange {
   state: string;
   date: Date;
@@ -99,9 +106,13 @@ export class WorkItem {
   // Deliberately compares against originalTargetDate, not the current
   // (possibly rescheduled) one — a deadline pushed back right before
   // slipping would otherwise always read as "on time".
+  //
+  // The deadline is treated as valid through the *end* of its day (local
+  // time): a date-only deadline is stored as midnight, which would otherwise
+  // make anything finished later that same day read as late.
   isLate(actualEndDate: Date | null): boolean | null {
     if (this.originalTargetDate == null || actualEndDate == null) return null;
-    return actualEndDate.getTime() > this.originalTargetDate.getTime();
+    return actualEndDate.getTime() > endOfDay(this.originalTargetDate).getTime();
   }
 
   // Classifies the item as 'mine' when assigned to myDisplayName

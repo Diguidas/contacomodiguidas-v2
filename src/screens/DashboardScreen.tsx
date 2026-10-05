@@ -21,7 +21,7 @@ import {
 } from '../services/metricsService';
 import { AppSettings } from '../services/settingsService';
 import { Sprint, SprintService } from '../services/sprintService';
-import { sprintCutoff } from '../services/sprintSnapshotService';
+import { overdueForSprint, sprintCutoff } from '../services/sprintSnapshotService';
 import { BrandColors } from '../theme';
 import { ToggleChip } from '../components/ToggleChip';
 import abapinhoLogo from '../assets/abapinho.png';
@@ -262,6 +262,7 @@ export function DashboardScreen({
     });
   }
   const [detailItem, setDetailItem] = useState<ItemMetric | null>(null);
+  const [overdueOpen, setOverdueOpen] = useState(false);
 
   function applyPendingFilters() {
     setSelectedType(pendingType);
@@ -504,6 +505,19 @@ export function DashboardScreen({
   const aging = agingItems;
   const triage = triageItems;
 
+  // "Atrasados da sprint": cards whose original deadline fell in the
+  // selected sprint and that missed it — concluded late, or still open with
+  // the deadline gone (so the current sprint just shows what's open and
+  // overdue so far). With no sprint picked there's no window to anchor to,
+  // so only what's open and overdue right now is shown.
+  const overdue =
+    selectedSprint != null
+      ? overdueForSprint(groupSummary.metrics, selectedSprint)
+      : {
+          doneLate: [] as ItemMetric[],
+          stillOpen: groupSummary.inProgress.filter((m) => !m.item.isCancelled && m.item.isLate(new Date()) === true),
+        };
+
   return (
     <div style={{ padding: 16, display: 'flex', justifyContent: 'center' }}>
       <div style={{ maxWidth: 1500, width: '100%' }}>
@@ -531,6 +545,9 @@ export function DashboardScreen({
         <SummaryCards
           summary={summary}
           aging={aging}
+          overdue={overdue}
+          hasSprint={selectedSprint != null}
+          onOpenOverdue={() => setOverdueOpen(true)}
           selectedCycleTimeCategories={selectedCycleTimeCategories}
           onToggleCycleTimeCategory={toggleCycleTimeCategory}
         />
@@ -568,6 +585,15 @@ export function DashboardScreen({
         <div style={{ height: 16 }} />
         <Footer lastUpdated={lastUpdated} onRefresh={onRefresh} />
       </div>
+      {overdueOpen && (
+        <OverdueDialog
+          title={selectedSprint != null ? `Atrasados da sprint ${selectedSprint.number}` : 'Atrasados em aberto'}
+          overdue={overdue}
+          categoryColorFor={categoryColorFor}
+          onSelectItem={setDetailItem}
+          onClose={() => setOverdueOpen(false)}
+        />
+      )}
       {detailItem && (
         <ItemDetailDialog
           metric={detailItem}
@@ -853,11 +879,17 @@ function StatGroup({ label, cards, header }: { label: string; cards: ReactNode[]
 function SummaryCards({
   summary,
   aging,
+  overdue,
+  hasSprint,
+  onOpenOverdue,
   selectedCycleTimeCategories,
   onToggleCycleTimeCategory,
 }: {
   summary: MetricsSummary;
   aging: ItemMetric[];
+  overdue: { doneLate: ItemMetric[]; stillOpen: ItemMetric[] };
+  hasSprint: boolean;
+  onOpenOverdue: () => void;
   selectedCycleTimeCategories: Set<CycleTimeCategory>;
   onToggleCycleTimeCategory: (c: CycleTimeCategory) => void;
 }) {
@@ -877,6 +909,19 @@ function SummaryCards({
 
   const volumeCards = [
     <StatCard key="open" title="Itens em aberto" subtitle="Qualquer coluna" value={`${aging.length}`} icon={<LayoutList size={18} strokeWidth={1.75} />} color={BrandColors.triage} />,
+    <div key="overdue" onClick={onOpenOverdue} style={{ cursor: 'pointer' }} title="Ver os cards atrasados">
+      <StatCard
+        title={hasSprint ? 'Atrasados da sprint' : 'Atrasados em aberto'}
+        subtitle={
+          hasSprint
+            ? `${overdue.doneLate.length} concluídos com atraso / ${overdue.stillOpen.length} abertos`
+            : 'Prazo original vencido, ainda não concluídos'
+        }
+        value={`${overdue.doneLate.length + overdue.stillOpen.length}`}
+        icon={<AlertTriangle size={18} strokeWidth={1.75} />}
+        color={overdue.doneLate.length + overdue.stillOpen.length === 0 ? BrandColors.user : BrandColors.danger}
+      />
+    </div>,
     <StatCard
       key="done"
       title="Concluídos na sprint"
@@ -987,7 +1032,7 @@ function boardColumnAverages(completed: ItemMetric[]): { column: string; avgDays
  * currently scoped to — so they can see at a glance where their own time
  * actually goes, at the granularity the board itself uses (not the 6-group
  * abstraction "Cycle Time é...") works with) — plus a Total (average
- * Backlog → Concluído, i.e. averageMetricDays over totalDays) so the
+ * Lead time (Criação → Concluído), i.e. averageMetricDays over totalDays) so the
  * per-column figures have something to be read against: the columns alone
  * don't add up to the same number (backlog time before the first tracked
  * column, and any column outside every group, aren't captured by any one
@@ -1023,7 +1068,7 @@ function ColumnAverageCard({ summary, personName }: { summary: MetricsSummary; p
         <div style={{ minWidth: 96 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: BrandColors.total, flexShrink: 0 }} />
-            <span style={{ fontSize: 12, color: '#64748B', fontWeight: 600 }}>Total (Backlog → Concluído)</span>
+            <span style={{ fontSize: 12, color: '#64748B', fontWeight: 600 }}>Lead time (Criação → Concluído)</span>
           </div>
           <div style={{ height: 4 }} />
           <div style={{ fontSize: 22, fontWeight: 'bold', color: BrandColors.total }}>{avgTotal != null ? `${avgTotal.toFixed(1)}d` : '—'}</div>
@@ -1714,6 +1759,59 @@ function SimpleTable({
   );
 }
 
+/** The cards behind the "Atrasados da sprint" tile: concluded late and
+ * still open, each in its own table. Clicking a row opens the item detail. */
+function OverdueDialog({
+  title,
+  overdue,
+  categoryColorFor,
+  onSelectItem,
+  onClose,
+}: {
+  title: string;
+  overdue: { doneLate: ItemMetric[]; stillOpen: ItemMetric[] };
+  categoryColorFor: (col: string) => string;
+  onSelectItem: (m: ItemMetric) => void;
+  onClose: () => void;
+}) {
+  const sections: { label: string; items: ItemMetric[]; showFim: boolean }[] = [
+    { label: 'Ainda abertos (prazo vencido)', items: overdue.stillOpen, showFim: false },
+    { label: 'Concluídos com atraso', items: overdue.doneLate, showFim: true },
+  ];
+  return (
+    <div
+      style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }}
+      onClick={onClose}
+    >
+      <div
+        style={{ backgroundColor: '#fff', borderRadius: 12, maxWidth: 1000, width: '92%', maxHeight: '85vh', overflowY: 'auto', padding: 20 }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+          <div style={{ flex: 1, fontWeight: 'bold', fontSize: 16 }}>{title}</div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}>
+            <X size={18} strokeWidth={2} />
+          </button>
+        </div>
+        <div style={{ fontSize: 12, color: '#64748B' }}>Cards com prazo original na sprint. Cards sem prazo original não entram.</div>
+        {sections.map((s) => (
+          <div key={s.label}>
+            <div style={{ height: 16 }} />
+            <div style={{ fontWeight: 'bold', fontSize: 13, marginBottom: 8 }}>
+              {s.label} ({s.items.length})
+            </div>
+            {s.items.length === 0 ? (
+              <span style={{ fontSize: 13, color: '#64748B' }}>Nenhum.</span>
+            ) : (
+              <SimpleTable items={s.items} showFim={s.showFim} categoryColorFor={categoryColorFor} onSelectItem={onSelectItem} />
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function InfoChip({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
     <div style={{ padding: '6px 10px', borderRadius: 8, backgroundColor: hexAlpha(color ?? '#64748B', 0.08) }}>
@@ -1745,7 +1843,7 @@ function ItemDetailDialog({
     { label: 'Usuário', value: metric.userDays, color: BrandColors.user },
     { label: 'Fornecedor', value: metric.vendorDays, color: BrandColors.vendor },
     { label: 'Geral', value: metric.generalDays, color: BrandColors.general },
-    { label: 'Total (backlog → concluído/agora)', value: metric.totalDays, color: BrandColors.total },
+    { label: 'Lead time (criação → concluído/agora)', value: metric.totalDays, color: BrandColors.total },
   ];
 
   const isLate = item.isLate(metric.endDate ?? new Date());

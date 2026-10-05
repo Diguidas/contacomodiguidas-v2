@@ -1,4 +1,4 @@
-import { WorkItem } from '../models/workItem';
+import { WorkItem, endOfDay } from '../models/workItem';
 
 const MS_PER_HOUR = 1000 * 60 * 60;
 
@@ -87,6 +87,13 @@ export class ItemMetric {
     return this.item.durationInColumnsMs(new Set(['Backlog']), { until }) / MS_PER_HOUR / 24.0;
   }
 
+  /** Time spent specifically in the "Request" column — like Backlog, a
+   * subset of generalDays that is waiting, not work. */
+  get requestDays(): number {
+    const until = new Date(this.item.createdDate.getTime() + this.totalDurationMs);
+    return this.item.durationInColumnsMs(new Set(['Request']), { until }) / MS_PER_HOUR / 24.0;
+  }
+
   /** "Cycle time" in this app always means developer-attributed time
    * (Desenvolvimento / Em Correção) — the one the user is measured on. */
   get cycleTimeDays(): number {
@@ -99,13 +106,21 @@ export class ItemMetric {
     return this.totalDurationMs / MS_PER_HOUR / 24.0;
   }
 
+  /** "Cycle Time do time": full elapsed time minus Triagem and Backlog —
+   * everything from the moment the card left Backlog to its conclusion.
+   * Same number on Visão do time and on History. */
+  get teamCycleDays(): number {
+    return this.totalDays - this.triageDays - this.backlogDays;
+  }
+
   /** Time actually worked on the item, by either the developer or the
    * analyst — Desenvolvedor + Geral, the two stages that are someone's own
    * judgment call on this card, as opposed to Triagem/Fila/Usuário/Fornecedor
-   * which are waiting on something outside their control. Only used for flow
+   * which are waiting on something outside their control. Backlog and Request
+   * sit inside Geral but are waiting too, so they're subtracted. Only used for flow
    * efficiency — `cycleTimeDays` elsewhere in the app stays developer-only. */
   get workedDays(): number {
-    return this.cycleTimeDays + this.generalDays;
+    return Math.max(0, this.cycleTimeDays + this.generalDays - this.backlogDays - this.requestDays);
   }
 
   /** Flow efficiency: the fraction of the item's total elapsed time that was
@@ -162,7 +177,7 @@ export class ItemMetric {
     const end = this.endDate;
     if (target == null || end == null) return null;
     const hypotheticalEnd = new Date(end.getTime() - this.externalWaitDurationMs);
-    return hypotheticalEnd.getTime() > target.getTime();
+    return hypotheticalEnd.getTime() > endOfDay(target).getTime();
   }
 
   /** Sum of every tracked category — should roughly equal totalDurationMs.

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { ArrowDown, ArrowUp, Minus, RefreshCw, X } from 'lucide-react';
-import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { ItemMetric } from '../services/metricsService';
 import { WorkItem } from '../models/workItem';
 import { AppSettings } from '../services/settingsService';
@@ -149,17 +149,25 @@ export function HistoryScreen({
                 </ChartCard>
               </div>
               <div style={{ flex: '1 1 380px' }}>
-                <ChartCard title="Cycle Time (Geral) por sprint">
+                <ChartCard title="Cycle Time do time por sprint">
                   <CycleTimeChart rows={rows} />
+                </ChartCard>
+              </div>
+              <div style={{ flex: '1 1 380px' }}>
+                <ChartCard
+                  title="Atrasados por sprint (prazo original na sprint)"
+                  footnote="Concluídos com atraso + ainda abertos com prazo vencido. Cards sem prazo original ficam de fora."
+                >
+                  <OverdueChart rows={rows} />
                 </ChartCard>
               </div>
             </div>
 
             <div style={{ height: 28 }} />
-            <SectionTitle title="Cycle Time por área" subtitle="Cycle Time (Geral) médio dos itens concluídos em cada sprint, uma linha por área." />
+            <SectionTitle title="Cycle Time por área" subtitle="Cycle Time do time médio (sem Triagem e Backlog) dos itens concluídos em cada sprint, uma linha por área." />
             <div style={{ height: 12 }} />
             <ChartCard title="Evolução por área" tall>
-              <CategoryCycleTimeChart closedBySprint={closedBySprint} groupOf={(m) => areaLeaf(m.item.areaPath)} valueOf={(m) => m.generalDays} />
+              <CategoryCycleTimeChart closedBySprint={closedBySprint} groupOf={(m) => areaLeaf(m.item.areaPath)} valueOf={(m) => m.teamCycleDays} />
             </ChartCard>
 
             <div style={{ height: 28 }} />
@@ -219,7 +227,8 @@ function CurrentSprintStrip({ sprint, snapshot }: { sprint: Sprint; snapshot: Sp
     [`${snapshot.closed}`, 'Concluídos'],
     [`${snapshot.stillOpen}`, 'Saída'],
     [snapshot.conversionPercent == null ? '—' : `${snapshot.conversionPercent.toFixed(0)}%`, 'Conversão'],
-    [snapshot.generalDaysAvg == null ? '—' : `${snapshot.generalDaysAvg.toFixed(1)} dias`, 'Cycle Time (Geral)'],
+    [snapshot.cycleDaysAvg == null ? '—' : `${snapshot.cycleDaysAvg.toFixed(1)} dias`, 'Cycle Time do time'],
+    [`${snapshot.overdueTotal}`, 'Atrasados'],
   ];
   return (
     <div style={{ backgroundColor: '#fff', border: `1.5px solid ${BrandColors.primary}`, borderRadius: 14, padding: '18px 22px', display: 'flex', boxShadow: '0 2px 12px rgba(15,23,42,0.04)' }}>
@@ -279,7 +288,7 @@ function ConversionChart({ rows }: { rows: [Sprint, SprintSnapshot][] }) {
 }
 
 function CycleTimeChart({ rows }: { rows: [Sprint, SprintSnapshot][] }) {
-  const data = rows.map(([sprint, snap]) => ({ label: `S${sprint.number}`, value: snap.generalDaysAvg })).filter((d) => d.value != null);
+  const data = rows.map(([sprint, snap]) => ({ label: `S${sprint.number}`, value: snap.cycleDaysAvg })).filter((d) => d.value != null);
   if (data.length === 0) {
     return <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>Sem itens concluídos nessas sprints ainda.</div>;
   }
@@ -292,6 +301,25 @@ function CycleTimeChart({ rows }: { rows: [Sprint, SprintSnapshot][] }) {
         <Tooltip formatter={(v) => `${Number(v).toFixed(1)}d`} />
         <Line type="linear" dataKey="value" stroke={BrandColors.developer} strokeWidth={3} dot />
       </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
+/** Stacked bars per sprint: cards whose original deadline fell in that
+ * sprint and that missed it — already concluded late vs. still open. */
+function OverdueChart({ rows }: { rows: [Sprint, SprintSnapshot][] }) {
+  const data = rows.map(([sprint, snap]) => ({ label: `S${sprint.number}`, done: snap.overdueDone, open: snap.overdueOpen }));
+  return (
+    <ResponsiveContainer width="100%" height="100%">
+      <BarChart data={data}>
+        <CartesianGrid strokeDasharray="3 3" vertical={false} />
+        <XAxis dataKey="label" tick={{ fontSize: 10 }} />
+        <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
+        <Tooltip />
+        <Legend wrapperStyle={{ fontSize: 11 }} />
+        <Bar dataKey="done" name="Concluídos com atraso" stackId="overdue" fill={BrandColors.warning} />
+        <Bar dataKey="open" name="Ainda abertos" stackId="overdue" fill={BrandColors.danger} />
+      </BarChart>
     </ResponsiveContainer>
   );
 }
@@ -783,7 +811,8 @@ function HistoryTable({ rows }: { rows: [Sprint, SprintSnapshot][] }) {
             <Th>Concluídos</Th>
             <Th>Saída</Th>
             <Th>Conversão</Th>
-            <Th>Cycle Time (Geral)</Th>
+            <Th>Cycle Time do time</Th>
+            <Th>Atrasados</Th>
           </tr>
         </thead>
         <tbody>
@@ -797,7 +826,15 @@ function HistoryTable({ rows }: { rows: [Sprint, SprintSnapshot][] }) {
                 <TrendCell value={snap.conversionPercent} previous={i > 0 ? rows[i - 1][1].conversionPercent : null} format={(v) => `${v.toFixed(0)}%`} />
               </Td>
               <Td>
-                <TrendCell value={snap.generalDaysAvg} previous={i > 0 ? rows[i - 1][1].generalDaysAvg : null} format={(v) => `${v.toFixed(1)}d`} lowerIsBetter />
+                <TrendCell value={snap.cycleDaysAvg} previous={i > 0 ? rows[i - 1][1].cycleDaysAvg : null} format={(v) => `${v.toFixed(1)}d`} lowerIsBetter />
+              </Td>
+              <Td>
+                <span title={`${snap.overdueDone} concluídos com atraso + ${snap.overdueOpen} ainda abertos`}>
+                  <TrendCell value={snap.overdueTotal} previous={i > 0 ? rows[i - 1][1].overdueTotal : null} format={(v) => `${v}`} lowerIsBetter />
+                </span>
+                <span style={{ fontSize: 11, color: '#94A3B8', marginLeft: 6 }}>
+                  ({snap.overdueDone} conc. / {snap.overdueOpen} abertos)
+                </span>
               </Td>
             </tr>
           ))}

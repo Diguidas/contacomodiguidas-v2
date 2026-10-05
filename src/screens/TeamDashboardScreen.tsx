@@ -241,7 +241,7 @@ interface AreaStats {
 /** The 5 headline numbers behind every comparison tile (área/setor/tipo de
  * demanda) and the top KPI strip — computed once here so all of them stay
  * perfectly consistent instead of each widget recomputing its own version.
- * "Cycle Time" here is the full elapsed time minus Triagem and Backlog —
+ * "Cycle Time do time" here is the full elapsed time minus Triagem and Backlog —
  * everything from the moment the card left Backlog to its conclusion. */
 function computeAreaStats(metrics: ItemMetric[], sprint: Sprint | null, triageColumns: Set<string>): AreaStats {
   const entered = metrics.filter((m) => enteredInSprintLocal(m, sprint, triageColumns));
@@ -249,7 +249,7 @@ function computeAreaStats(metrics: ItemMetric[], sprint: Sprint | null, triageCo
   const stillOpen = entered.filter((m) => !endedInSprintLocal(m, sprint)).length;
   const conversion = entered.length === 0 ? null : (closed.length / entered.length) * 100;
   const cycleDays =
-    closed.length === 0 ? null : closed.reduce((s, m) => s + (m.totalDays - m.triageDays - m.backlogDays), 0) / closed.length;
+    closed.length === 0 ? null : closed.reduce((s, m) => s + m.teamCycleDays, 0) / closed.length;
   return { entered: entered.length, closed: closed.length, stillOpen, conversion, cycleDays };
 }
 
@@ -1481,7 +1481,7 @@ function CompactAreaTile({
           <CompactStat value={`${stats.stillOpen}`} label="Saída" />
         </div>
         <div style={{ flex: 1 }}>
-          <CompactStat value={stats.cycleDays == null ? '—' : `${stats.cycleDays.toFixed(1)}d`} label="Cycle Time" />
+          <CompactStat value={stats.cycleDays == null ? '—' : `${stats.cycleDays.toFixed(1)}d`} label="Cycle Time do time" />
         </div>
       </div>
       <div style={{ height: 8 }} />

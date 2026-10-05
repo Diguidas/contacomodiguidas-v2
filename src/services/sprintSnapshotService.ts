@@ -13,6 +13,35 @@ export function sprintCutoff(sprint: Sprint): Date {
   return new Date(sprint.end.getTime() + 24 * 60 * 60 * 1000);
 }
 
+// "Atrasados da sprint": cards whose *original* deadline fell inside
+// `sprint` and that missed it — either concluded after the deadline
+// (`doneLate`) or still open with the deadline already passed as of `now`
+// (`stillOpen`). A card belongs to the sprint it promised to deliver in, so
+// a past sprint's number only moves when one of its still-open cards
+// finally closes (it just changes bucket). Cards with no original deadline
+// can't be late and are ignored, as is anything cancelled.
+export function overdueForSprint(
+  metrics: ItemMetric[],
+  sprint: Sprint,
+  now: Date = new Date(),
+): { doneLate: ItemMetric[]; stillOpen: ItemMetric[] } {
+  const start = sprint.start.getTime();
+  const end = sprintCutoff(sprint).getTime();
+  const doneLate: ItemMetric[] = [];
+  const stillOpen: ItemMetric[] = [];
+  for (const m of metrics) {
+    if (m.item.isCancelled) continue;
+    const target = m.item.originalTargetDate;
+    if (target == null || target.getTime() < start || target.getTime() >= end) continue;
+    if (m.done) {
+      if (m.endDate != null && m.item.isLate(m.endDate) === true) doneLate.push(m);
+    } else if (m.item.isLate(now) === true) {
+      stillOpen.push(m);
+    }
+  }
+  return { doneLate, stillOpen };
+}
+
 // Whether `item` was created within `sprint`'s date window.
 export function createdInSprint(item: WorkItem, sprint: Sprint): boolean {
   const d = item.createdDate;
@@ -157,20 +186,33 @@ export class SprintSnapshot {
   readonly entered: number;
   readonly closed: number;
   readonly stillOpen: number;
-  readonly generalDaysAvg: number | null;
+  /** Média de "Cycle Time do time" (total − Triagem − Backlog) dos fechados. */
+  readonly cycleDaysAvg: number | null;
+  /** Atrasados da sprint (prazo original na sprint): concluídos com atraso. */
+  readonly overdueDone: number;
+  /** Atrasados da sprint: ainda abertos com o prazo vencido. */
+  readonly overdueOpen: number;
 
   constructor(init: {
     sprintNumber: number;
     entered: number;
     closed: number;
     stillOpen: number;
-    generalDaysAvg: number | null;
+    cycleDaysAvg: number | null;
+    overdueDone: number;
+    overdueOpen: number;
   }) {
     this.sprintNumber = init.sprintNumber;
     this.entered = init.entered;
     this.closed = init.closed;
     this.stillOpen = init.stillOpen;
-    this.generalDaysAvg = init.generalDaysAvg;
+    this.cycleDaysAvg = init.cycleDaysAvg;
+    this.overdueDone = init.overdueDone;
+    this.overdueOpen = init.overdueOpen;
+  }
+
+  get overdueTotal(): number {
+    return this.overdueDone + this.overdueOpen;
   }
 
   get conversionPercent(): number | null {
@@ -183,7 +225,9 @@ export class SprintSnapshot {
       entered: this.entered,
       closed: this.closed,
       stillOpen: this.stillOpen,
-      generalDaysAvg: this.generalDaysAvg,
+      cycleDaysAvg: this.cycleDaysAvg,
+      overdueDone: this.overdueDone,
+      overdueOpen: this.overdueOpen,
     };
   }
 
@@ -193,7 +237,9 @@ export class SprintSnapshot {
       entered: json.entered as number,
       closed: json.closed as number,
       stillOpen: json.stillOpen as number,
-      generalDaysAvg: json.generalDaysAvg == null ? null : Number(json.generalDaysAvg),
+      cycleDaysAvg: json.cycleDaysAvg == null ? null : Number(json.cycleDaysAvg),
+      overdueDone: Number(json.overdueDone ?? 0),
+      overdueOpen: Number(json.overdueOpen ?? 0),
     });
   }
 }
@@ -238,15 +284,18 @@ export function buildSprintSnapshot(params: {
   const entered = [...newThisSprint, ...carriedOver];
   const closed = scoped.filter((m) => endedInSprint(m, sprint));
   const stillOpen = entered.filter((m) => !doneAsOf(m, cutoff)).length;
-  const generalDaysAvg =
-    closed.length === 0 ? null : closed.reduce((s, m) => s + m.generalDays, 0) / closed.length;
+  const overdue = overdueForSprint(scoped, sprint);
+  const cycleDaysAvg =
+    closed.length === 0 ? null : closed.reduce((s, m) => s + m.teamCycleDays, 0) / closed.length;
 
   return new SprintSnapshot({
     sprintNumber: sprint.number,
     entered: entered.length,
     closed: closed.length,
     stillOpen,
-    generalDaysAvg,
+    cycleDaysAvg,
+    overdueDone: overdue.doneLate.length,
+    overdueOpen: overdue.stillOpen.length,
   });
 }
 
