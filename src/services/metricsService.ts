@@ -2,6 +2,10 @@ import { WorkItem, endOfDay } from '../models/workItem';
 
 const MS_PER_HOUR = 1000 * 60 * 60;
 
+/** Columns that don't count toward the Dashboard's Cycle Time: everything
+ * else is part of the "network" of columns. */
+const CYCLE_TIME_EXCLUDED_COLUMNS = new Set(['Triagem', 'New', 'Backlog', 'Removed', 'Sem retorno do usuário']);
+
 /** Formats a duration given in days as whichever unit actually reads
  * naturally — minutes for anything under an hour, hours for anything under
  * a day, days otherwise. A card resolved in 12 minutes showing "0.0 dias"
@@ -98,6 +102,16 @@ export class ItemMetric {
    * (Desenvolvimento / Em Correção) — the one the user is measured on. */
   get cycleTimeDays(): number {
     return this.developerDurationMs / MS_PER_HOUR / 24.0;
+  }
+
+  /** Cycle Time: time the card spent in any column of the "network" — every
+   * column except CYCLE_TIME_EXCLUDED_COLUMNS — from creation until it was
+   * concluded (or now/cutoff, if still open). Counts every pass through the
+   * network, not just the first entry into Em Andamento. */
+  get inProgressCycleDays(): number {
+    const until = new Date(this.item.createdDate.getTime() + this.totalDurationMs);
+    const excludedMs = this.item.durationInColumnsMs(CYCLE_TIME_EXCLUDED_COLUMNS, { until });
+    return Math.max(0, this.totalDurationMs - excludedMs) / MS_PER_HOUR / 24.0;
   }
 
   /** Full elapsed time from creation to conclusion (or now, if still open) —

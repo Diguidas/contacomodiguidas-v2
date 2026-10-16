@@ -31,12 +31,6 @@ function averageDays(s: ColumnStat): number | null {
   if (s.daysPerItem.length === 0) return null;
   return s.daysPerItem.reduce((a, b) => a + b, 0) / s.daysPerItem.length;
 }
-function medianDays(s: ColumnStat): number | null {
-  if (s.daysPerItem.length === 0) return null;
-  const sorted = [...s.daysPerItem].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
-}
 function maxDays(s: ColumnStat): number | null {
   if (s.daysPerItem.length === 0) return null;
   return Math.max(...s.daysPerItem);
@@ -524,7 +518,6 @@ function ColumnTable({ stats }: { stats: ColumnStat[] }) {
               <Th>Grupo</Th>
               <Th>Cards</Th>
               <Th>Médio</Th>
-              <Th>Mediana</Th>
               <Th>Pior caso</Th>
             </tr>
           </thead>
@@ -537,7 +530,6 @@ function ColumnTable({ stats }: { stats: ColumnStat[] }) {
                 </Td>
                 <Td>{itemCount(s)}</Td>
                 <Td>{averageDays(s) != null ? `${averageDays(s)!.toFixed(1)}d` : '—'}</Td>
-                <Td>{medianDays(s) != null ? `${medianDays(s)!.toFixed(1)}d` : '—'}</Td>
                 <Td>{maxDays(s) != null ? `${maxDays(s)!.toFixed(1)}d` : '—'}</Td>
               </tr>
             ))}

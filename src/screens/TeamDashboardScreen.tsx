@@ -139,7 +139,10 @@ function enteredInSprintLocal(m: ItemMetric, sprint: Sprint | null, triageColumn
   const closedByCutoff = m.done && m.endDate != null && m.endDate.getTime() <= cutoff.getTime();
   if (closedByCutoff) return true;
   const columnNow = m.item.boardColumnAsOf(cutoff);
-  return !boardColumnMatches(triageColumns, columnNow) && columnNow.trim().toLowerCase() !== 'backlog';
+  if (m.item.isCancelled) return false;
+  // Not yet in flow: New, Triagem, Backlog and Aguardando Fornecedor don't count as "entraram".
+  const notInFlow = new Set(['new', 'backlog', 'aguardando fornecedor']);
+  return !boardColumnMatches(triageColumns, columnNow) && !notInFlow.has(columnNow.trim().toLowerCase());
 }
 
 interface SuspiciousRanking {
@@ -241,15 +244,14 @@ interface AreaStats {
 /** The 5 headline numbers behind every comparison tile (área/setor/tipo de
  * demanda) and the top KPI strip — computed once here so all of them stay
  * perfectly consistent instead of each widget recomputing its own version.
- * "Cycle Time do time" here is the full elapsed time minus Triagem and Backlog —
- * everything from the moment the card left Backlog to its conclusion. */
+ * Cycle Time here runs from the card's first "Em Andamento" to its conclusion. */
 function computeAreaStats(metrics: ItemMetric[], sprint: Sprint | null, triageColumns: Set<string>): AreaStats {
   const entered = metrics.filter((m) => enteredInSprintLocal(m, sprint, triageColumns));
   const closed = metrics.filter((m) => endedInSprintLocal(m, sprint));
   const stillOpen = entered.filter((m) => !endedInSprintLocal(m, sprint)).length;
   const conversion = entered.length === 0 ? null : (closed.length / entered.length) * 100;
   const cycleDays =
-    closed.length === 0 ? null : closed.reduce((s, m) => s + m.teamCycleDays, 0) / closed.length;
+    closed.length === 0 ? null : closed.reduce((s, m) => s + m.inProgressCycleDays, 0) / closed.length;
   return { entered: entered.length, closed: closed.length, stillOpen, conversion, cycleDays };
 }
 
@@ -483,10 +485,30 @@ export function TeamDashboardScreen({
       seen.add(col.toLowerCase());
       ordered.push(col);
     }
-    return ordered.map((name) => ({
-      name,
-      count: openItems.filter((m) => m.item.currentBoardColumn.trim().toLowerCase() === name.trim().toLowerCase()).length,
-    }));
+    // Fixed pipeline order the team asked for; Triagem and New are left out.
+    const norm = (s: string) => s.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    const rankOf = (name: string): number => {
+      const n = norm(name);
+      if (n.includes('backlog')) return 0;
+      if (n.includes('andamento')) return 1;
+      if (n.includes('liberado')) return 2;
+      if (n.includes('desenvolvimento')) return 3;
+      if (n.includes('fornecedor')) return 5;
+      if (n.includes('aguard')) return 4;
+      if (n.includes('funcional')) return 6;
+      if (n.includes('validacao')) return 7;
+      if (n.includes('correcao')) return 8;
+      if (n.includes('request')) return 9;
+      return 10;
+    };
+    return ordered
+      .filter((name) => !boardColumnMatches(settings.triageColumnSet, name) && norm(name) !== 'new')
+      .map((name, i) => ({ name, i, rank: rankOf(name) }))
+      .sort((a, b) => a.rank - b.rank || a.i - b.i)
+      .map(({ name }) => ({
+        name,
+        count: openItems.filter((m) => m.item.currentBoardColumn.trim().toLowerCase() === name.trim().toLowerCase()).length,
+      }));
   })();
 
   // Reverse of WorkItem.childIds — which Feature (if any) a given item is a
@@ -591,7 +613,7 @@ export function TeamDashboardScreen({
       const values = list.map(daysOf);
       return { name, median: median(values), average: values.reduce((a, b) => a + b, 0) / values.length, p85: percentile85(values), count: values.length, items: list };
     });
-    rows.sort((a, b) => (a.median !== b.median ? a.median - b.median : a.average !== b.average ? a.average - b.average : a.p85 - b.p85));
+    rows.sort((a, b) => a.average - b.average);
     return rows;
   }
   const triageSpeedRanking = speedRanking((m) => m.triageDays, false);
@@ -980,7 +1002,7 @@ export function TeamDashboardScreen({
                 icon={<Inbox size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.triage}
                 title="Média de velocidade de Triagem"
-                subtitle='Mediana, média e P85 do tempo em Triagem, só nos itens concluídos que de fato passaram um tempo mensurável lá (itens que nunca tocaram Triagem não entram na conta de ninguém) — do mais rápido para o mais lento a tirar um card de lá.'
+                subtitle='Tempo médio em Triagem, só nos itens concluídos que de fato passaram um tempo mensurável lá (itens que nunca tocaram Triagem não entram na conta de ninguém) — do mais rápido para o mais lento a tirar um card de lá.'
               />
               <div style={{ height: 12 }} />
               <CycleTimeTable
@@ -994,7 +1016,7 @@ export function TeamDashboardScreen({
                 icon={<CheckCircle2 size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.queue}
                 title="Média de velocidade na fila"
-                subtitle='Mediana, média e P85 do tempo em "Liberado para Desenvolvimento", só nos itens concluídos que de fato passaram um tempo mensurável lá — do mais rápido para o mais lento a pegar um card da fila.'
+                subtitle='Tempo médio em "Liberado para Desenvolvimento", só nos itens concluídos que de fato passaram um tempo mensurável lá — do mais rápido para o mais lento a pegar um card da fila.'
               />
               <div style={{ height: 12 }} />
               <CycleTimeTable
@@ -1478,10 +1500,10 @@ function CompactAreaTile({
       <div style={{ height: 6 }} />
       <div style={{ display: 'flex' }}>
         <div style={{ flex: 1 }}>
-          <CompactStat value={`${stats.stillOpen}`} label="Saída" />
+          <CompactStat value={`${stats.stillOpen}`} label="Sobrou na esteira" />
         </div>
         <div style={{ flex: 1 }}>
-          <CompactStat value={stats.cycleDays == null ? '—' : `${stats.cycleDays.toFixed(1)}d`} label="Cycle Time do time" />
+          <CompactStat value={stats.cycleDays == null ? '—' : `${stats.cycleDays.toFixed(1)}d`} label="Cycle Time" />
         </div>
       </div>
       <div style={{ height: 8 }} />
@@ -1618,7 +1640,7 @@ function GroupCountTable({
               <Th>Entraram</Th>
               <Th>Concluídos</Th>
               <Th>Conversão</Th>
-              <Th>Saída</Th>
+              <Th>Sobrou na esteira</Th>
             </tr>
           </thead>
           <tbody>
@@ -2199,9 +2221,7 @@ function CycleTimeTable({
             <Th>#</Th>
             <Th>Responsável</Th>
             {showStage && <Th>Estágio</Th>}
-            <Th>Mediana</Th>
             <Th>Média</Th>
-            <Th>P85</Th>
             <Th>Itens</Th>
           </tr>
         </thead>
@@ -2221,9 +2241,7 @@ function CycleTimeTable({
                   )}
                 </Td>
               )}
-              <Td>{r.median.toFixed(1)}d</Td>
               <Td>{r.average.toFixed(1)}d</Td>
-              <Td>{r.p85.toFixed(1)}d</Td>
               <Td>{r.count}</Td>
             </tr>
           ))}

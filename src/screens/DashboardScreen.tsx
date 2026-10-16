@@ -23,7 +23,6 @@ import { AppSettings } from '../services/settingsService';
 import { Sprint, SprintService } from '../services/sprintService';
 import { overdueForSprint, sprintCutoff } from '../services/sprintSnapshotService';
 import { BrandColors } from '../theme';
-import { ToggleChip } from '../components/ToggleChip';
 import abapinhoLogo from '../assets/abapinho.png';
 import {
   AlertTriangle,
@@ -98,93 +97,6 @@ function storePerson(name: string | null): void {
 
 type TypeFilter = 'cards' | 'features' | 'all';
 type BreakdownDimension = 'complexity' | 'department' | 'priority' | 'requestType';
-type SortMode = 'defaultOrder' | 'responsible';
-
-/** Which category counts as "Cycle Time" throughout the dashboard — cards,
- * chart reference line, and the breakdown table all follow this. */
-type CycleTimeCategory = 'triage' | 'queue' | 'developer' | 'user' | 'vendor' | 'general';
-
-const CYCLE_TIME_CATEGORIES: CycleTimeCategory[] = [
-  'triage',
-  'queue',
-  'developer',
-  'user',
-  'vendor',
-  'general',
-];
-
-function cycleTimeLabel(c: CycleTimeCategory): string {
-  switch (c) {
-    case 'triage':
-      return 'Triagem';
-    case 'queue':
-      return 'Fila';
-    case 'developer':
-      return 'Desenvolvedor';
-    case 'user':
-      return 'Usuário';
-    case 'vendor':
-      return 'Fornecedor';
-    case 'general':
-      return 'Geral';
-  }
-}
-
-function cycleTimeColor(c: CycleTimeCategory): string {
-  switch (c) {
-    case 'triage':
-      return BrandColors.triage;
-    case 'queue':
-      return BrandColors.queue;
-    case 'developer':
-      return BrandColors.developer;
-    case 'user':
-      return BrandColors.user;
-    case 'vendor':
-      return BrandColors.vendor;
-    case 'general':
-      return BrandColors.general;
-  }
-}
-
-function cycleTimeSelect(c: CycleTimeCategory, m: ItemMetric): number {
-  switch (c) {
-    case 'triage':
-      return m.triageDays;
-    case 'queue':
-      return m.queueDays;
-    case 'developer':
-      return m.cycleTimeDays;
-    case 'user':
-      return m.userDays;
-    case 'vendor':
-      return m.vendorDays;
-    case 'general':
-      return m.generalDays;
-  }
-}
-
-/** Sums every checked category's time on the same item — checking more than
- * one chip adds them together (e.g. Desenvolvedor + Fila = time actually
- * worked plus time waiting to be picked up), instead of only ever showing
- * one category at a time. */
-function cycleTimeSelectMulti(categories: Set<CycleTimeCategory>, m: ItemMetric): number {
-  let total = 0;
-  for (const c of CYCLE_TIME_CATEGORIES) {
-    if (categories.has(c)) total += cycleTimeSelect(c, m);
-  }
-  return total;
-}
-
-function cycleTimeCombinedLabel(categories: Set<CycleTimeCategory>): string {
-  const labels = CYCLE_TIME_CATEGORIES.filter((c) => categories.has(c)).map(cycleTimeLabel);
-  return labels.length === 0 ? 'Nenhum grupo' : labels.join(' + ');
-}
-
-function cycleTimeCombinedColor(categories: Set<CycleTimeCategory>): string {
-  if (categories.size === 1) return cycleTimeColor([...categories][0]);
-  return BrandColors.primary;
-}
 
 function formatDate(d: Date): string {
   return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
@@ -248,19 +160,7 @@ export function DashboardScreen({
 
   const [showAllAging, setShowAllAging] = useState(false);
   const [triageExpanded, setTriageExpanded] = useState(false);
-  const [sortMode, setSortMode] = useState<SortMode>('defaultOrder');
   const [selectedBreakdown, setSelectedBreakdown] = useState<BreakdownDimension>('complexity');
-  const [selectedCycleTimeCategories, setSelectedCycleTimeCategories] = useState<Set<CycleTimeCategory>>(
-    () => new Set<CycleTimeCategory>(['general']),
-  );
-  function toggleCycleTimeCategory(c: CycleTimeCategory) {
-    setSelectedCycleTimeCategories((prev) => {
-      const next = new Set(prev);
-      if (next.has(c)) next.delete(c);
-      else next.add(c);
-      return next;
-    });
-  }
   const [detailItem, setDetailItem] = useState<ItemMetric | null>(null);
   const [overdueOpen, setOverdueOpen] = useState(false);
 
@@ -290,18 +190,20 @@ export function DashboardScreen({
   const knownAreas = [...new Set(items.map((i) => i.areaPath.trim()).filter((a) => a))].sort();
   const areaLeaf = (areaPath: string) => areaPath.split('\\').pop() ?? areaPath;
 
-  // Applies the current "Ordenar por" choice on top of whatever order the
-  // list already came in — grouping by responsável makes a lot more sense
-  // than the default order once you're looking at the whole sprint mixed
-  // together (group: Tudo).
   function applySort(list: ItemMetric[]): ItemMetric[] {
-    if (sortMode !== 'responsible') return list;
-    return [...list].sort((a, b) => {
-      const cmp = a.item.assignedTo.trim().toLowerCase().localeCompare(b.item.assignedTo.trim().toLowerCase());
-      if (cmp !== 0) return cmp;
-      return b.totalDays - a.totalDays;
-    });
+    return list;
   }
+
+  // Cycle Time per item: items of mine use the column network; items that
+  // only matched through the tag (assigned to someone else) count just the
+  // time they sat with me, in Desenvolvedor/Em Correção.
+  const cycleOf = (m: ItemMetric): number => {
+    const isMyDisplay =
+      selectedSpecificPerson != null &&
+      selectedSpecificPerson.trim().toLowerCase() === settings.myDisplayName.trim().toLowerCase();
+    const assignedToMe = m.item.assignedTo.trim().toLowerCase() === settings.myDisplayName.trim().toLowerCase();
+    return isMyDisplay && !assignedToMe ? m.cycleTimeDays : m.inProgressCycleDays;
+  };
 
   const itemsInSelectedGroup = items.filter((item) => {
     // Cancelled items (removed, or abandoned for lack of user response)
@@ -536,8 +438,6 @@ export function DashboardScreen({
           areaLeaf={areaLeaf}
           pendingSprint={pendingSprint}
           setPendingSprint={setPendingSprint}
-          sortMode={sortMode}
-          setSortMode={setSortMode}
           onSearch={applyPendingFilters}
         />
         <div style={{ height: 20 }} />
@@ -547,21 +447,20 @@ export function DashboardScreen({
           aging={aging}
           overdue={overdue}
           hasSprint={selectedSprint != null}
+          cycleOf={cycleOf}
           onOpenOverdue={() => setOverdueOpen(true)}
-          selectedCycleTimeCategories={selectedCycleTimeCategories}
-          onToggleCycleTimeCategory={toggleCycleTimeCategory}
         />
         <div style={{ height: 20 }} />
         <ColumnAverageCard summary={last30DaysSummary()} personName={selectedSpecificPerson ?? 'responsável'} />
         <div style={{ height: 20 }} />
-        <TaggedQueueSection selectedSpecificPerson={selectedSpecificPerson} settings={settings} groupSummary={groupSummary} />
+        <TaggedQueueSection selectedSpecificPerson={selectedSpecificPerson} settings={settings} groupSummary={groupSummary} selectedSprint={selectedSprint} />
         <ChartsRow summary={summary} onSeeDetails={() => completedSectionRef.current?.scrollIntoView({ behavior: 'smooth' })} />
         <div style={{ height: 20 }} />
         <BreakdownSection
           summary={summary}
+          cycleOf={cycleOf}
           selectedBreakdown={selectedBreakdown}
           setSelectedBreakdown={setSelectedBreakdown}
-          selectedCycleTimeCategories={selectedCycleTimeCategories}
         />
         <div style={{ height: 20 }} />
         <AgingSection
@@ -680,8 +579,6 @@ function Filters({
   areaLeaf,
   pendingSprint,
   setPendingSprint,
-  sortMode,
-  setSortMode,
   onSearch,
 }: {
   settings: AppSettings;
@@ -698,8 +595,6 @@ function Filters({
   areaLeaf: (s: string) => string;
   pendingSprint: Sprint | null;
   setPendingSprint: (v: Sprint | null) => void;
-  sortMode: SortMode;
-  setSortMode: (v: SortMode) => void;
   onSearch: () => void;
 }) {
   return (
@@ -772,13 +667,6 @@ function Filters({
           <Search size={16} strokeWidth={2} /> Pesquisar
         </button>
       </div>
-      <div style={{ height: 8 }} />
-      <FieldWrap label="Ordenar por" width={200}>
-        <select style={selectStyle()} value={sortMode} onChange={(e) => setSortMode(e.target.value as SortMode)}>
-          <option value="defaultOrder">Padrão (mais antigo)</option>
-          <option value="responsible">Responsável (A-Z)</option>
-        </select>
-      </FieldWrap>
       <div style={{ height: 8 }} />
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
         <span style={{ fontSize: 13, color: '#94A3B8' }}>ⓘ</span>
@@ -881,29 +769,26 @@ function SummaryCards({
   aging,
   overdue,
   hasSprint,
+  cycleOf,
   onOpenOverdue,
-  selectedCycleTimeCategories,
-  onToggleCycleTimeCategory,
 }: {
   summary: MetricsSummary;
   aging: ItemMetric[];
   overdue: { doneLate: ItemMetric[]; stillOpen: ItemMetric[] };
   hasSprint: boolean;
+  cycleOf: (m: ItemMetric) => number;
   onOpenOverdue: () => void;
-  selectedCycleTimeCategories: Set<CycleTimeCategory>;
-  onToggleCycleTimeCategory: (c: CycleTimeCategory) => void;
 }) {
-  const selector = (m: ItemMetric) => cycleTimeSelectMulti(selectedCycleTimeCategories, m);
-  const avgCycleTime = summary.averageMetricDays(selector);
+  const avgCycleTime = summary.averageMetricDays(cycleOf);
 
   const cycleTimeCards = [
     <StatCard
       key="avg"
-      title={`Cycle Time médio (${cycleTimeCombinedLabel(selectedCycleTimeCategories)})`}
-      subtitle="Média geral dos itens"
+      title="Cycle Time médio"
+      subtitle="De Em Andamento até Concluído"
       value={avgCycleTime != null ? `${avgCycleTime.toFixed(1)} dias` : '—'}
       icon={<Clock size={18} strokeWidth={1.75} />}
-      color={cycleTimeCombinedColor(selectedCycleTimeCategories)}
+      color={BrandColors.primary}
     />,
   ];
 
@@ -976,18 +861,6 @@ function SummaryCards({
       <StatGroup
         label="Cycle Time"
         cards={cycleTimeCards}
-        header={
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            {CYCLE_TIME_CATEGORIES.map((c) => (
-              <ToggleChip
-                key={c}
-                label={cycleTimeLabel(c)}
-                selected={selectedCycleTimeCategories.has(c)}
-                onSelected={() => onToggleCycleTimeCategory(c)}
-              />
-            ))}
-          </div>
-        }
       />
       <StatGroup label="Entrega" cards={volumeCards} />
       <StatGroup label="Qualidade & prazo" cards={qualityCards} />
@@ -1115,17 +988,42 @@ function TaggedQueueSection({
   selectedSpecificPerson,
   settings,
   groupSummary,
+  selectedSprint,
 }: {
   selectedSpecificPerson: string | null;
   settings: AppSettings;
   groupSummary: MetricsSummary;
+  selectedSprint: Sprint | null;
 }) {
   if (selectedSpecificPerson?.trim().toLowerCase() !== settings.myDisplayName.trim().toLowerCase()) return null;
-  // Items carrying tagFilter that have already left the queue columns —
-  // moved somewhere else, whether or not they're done yet.
+  const tag = settings.tagFilter.trim().toLowerCase();
+  // Last time the item left a queue column (picked up) — null if it never did.
+  const pickupDate = (m: ItemMetric): Date | null => {
+    const history = m.item.boardColumnHistory;
+    let picked: Date | null = null;
+    for (let i = 1; i < history.length; i++) {
+      if (
+        boardColumnMatches(settings.queueColumnSet, history[i - 1].state) &&
+        !boardColumnMatches(settings.queueColumnSet, history[i].state)
+      ) {
+        picked = history[i].date;
+      }
+    }
+    return picked;
+  };
+  // Items carrying tagFilter that left the queue columns (inside the selected
+  // sprint, when there is one) — whether or not they're done yet.
   const pickups = groupSummary.metrics
+    .filter((m) => m.item.tags.some((t) => t.trim().toLowerCase() === tag))
     .filter((m) => m.queueDurationMs > 0)
-    .filter((m) => !boardColumnMatches(settings.queueColumnSet, m.item.currentBoardColumn));
+    .filter((m) => !boardColumnMatches(settings.queueColumnSet, m.item.currentBoardColumn))
+    .filter((m) => {
+      if (selectedSprint == null) return true;
+      const picked = pickupDate(m);
+      if (picked == null) return false;
+      const rangeEnd = selectedSprint.end.getTime() + 24 * 60 * 60 * 1000;
+      return picked.getTime() >= selectedSprint.start.getTime() && picked.getTime() < rangeEnd;
+    });
   const days = pickups.map((m) => m.queueDays).sort((a, b) => a - b);
 
   let avg: number | null = null;
@@ -1324,14 +1222,14 @@ function PillGroup<T extends string>({
 
 function BreakdownSection({
   summary,
+  cycleOf,
   selectedBreakdown,
   setSelectedBreakdown,
-  selectedCycleTimeCategories,
 }: {
   summary: MetricsSummary;
+  cycleOf: (m: ItemMetric) => number;
   selectedBreakdown: BreakdownDimension;
   setSelectedBreakdown: (v: BreakdownDimension) => void;
-  selectedCycleTimeCategories: Set<CycleTimeCategory>;
 }) {
   let keyOf: (i: WorkItem) => string;
   let unitLabel: string;
@@ -1353,8 +1251,8 @@ function BreakdownSection({
       unitLabel = 'Tipo de demanda';
       break;
   }
-  const rows = groupBreakdown(summary.completed, keyOf, (m) => cycleTimeSelectMulti(selectedCycleTimeCategories, m));
-  const metricLabel = `${cycleTimeCombinedLabel(selectedCycleTimeCategories)} médio`;
+  const rows = groupBreakdown(summary.completed, keyOf, cycleOf);
+  const metricLabel = 'Cycle Time médio';
 
   return (
     <div style={cardStyle()}>
@@ -1363,8 +1261,7 @@ function BreakdownSection({
       </div>
       <div style={{ height: 4 }} />
       <div style={{ fontSize: 12, color: '#64748B' }}>
-        Itens concluídos na sprint selecionada, ordenados do maior "{metricLabel}" para o menor. Métrica de tempo controlada pelo seletor
-        "Cycle Time é..." acima.
+        Itens concluídos na sprint selecionada, ordenados do maior "{metricLabel}" para o menor. Cycle Time = de Em Andamento até Concluído.
       </div>
       <div style={{ height: 12 }} />
       <PillGroup
@@ -1398,7 +1295,7 @@ function BreakdownSection({
                   <Td>{r.label}</Td>
                   <Td numeric>{r.count}</Td>
                   <Td numeric>
-                    <span style={{ fontWeight: 'bold', color: cycleTimeCombinedColor(selectedCycleTimeCategories) }}>
+                    <span style={{ fontWeight: 'bold', color: BrandColors.primary }}>
                       {r.avgMetricDays != null ? `${r.avgMetricDays.toFixed(1)} dias` : '—'}
                     </span>
                   </Td>
