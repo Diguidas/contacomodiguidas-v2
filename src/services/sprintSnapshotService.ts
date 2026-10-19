@@ -497,7 +497,9 @@ export class HealthScoreRanking {
   readonly noDeadlineItems: ItemMetric[];
   readonly fastItems: ItemMetric[];
   readonly notFastItems: ItemMetric[];
-  readonly speedStage: 'geral' | 'desenvolvimento' | null;
+  // The shared "fast" cutoff (mediana do Cycle Time do time na sprint) —
+  // same value on every row, null when there's nothing to compute it from.
+  readonly teamMedianDays: number | null;
 
   constructor(init: {
     name: string;
@@ -512,7 +514,7 @@ export class HealthScoreRanking {
     noDeadlineItems: ItemMetric[];
     fastItems: ItemMetric[];
     notFastItems: ItemMetric[];
-    speedStage: 'geral' | 'desenvolvimento' | null;
+    teamMedianDays: number | null;
   }) {
     this.name = init.name;
     this.score = init.score;
@@ -526,7 +528,7 @@ export class HealthScoreRanking {
     this.noDeadlineItems = init.noDeadlineItems;
     this.fastItems = init.fastItems;
     this.notFastItems = init.notFastItems;
-    this.speedStage = init.speedStage;
+    this.teamMedianDays = init.teamMedianDays;
   }
 }
 
@@ -581,46 +583,16 @@ export function buildHealthScoreRanking(params: {
   }
   if (byName.size === 0) return [];
 
-  // Each person is measured on the stage where they actually work — Geral
-  // or Desenvolvimento. Respects the manual override set in Visão do time
-  // (settings.personStageOverrides) so this stays consistent with the
-  // "Ranking de execução própria" table; falls back to auto-detecting
-  // whichever stage they accumulated more time in from their own
-  // non-suspicious completed items. Otherwise someone who works in
-  // Desenvolvimento reads as if they never touched Geral, which would
-  // misclassify every one of their items.
-  const stageByName = new Map<string, 'geral' | 'desenvolvimento' | null>();
-  for (const [name, value] of byName.entries()) {
-    const reliable = value.filter((m) => !m.isSuspicious);
-    if (reliable.length === 0) {
-      stageByName.set(name, null);
-      continue;
-    }
-    const override = settings.personStageOverrides[name];
-    let useDeveloper: boolean;
-    if (override === 'desenvolvimento') {
-      useDeveloper = true;
-    } else if (override === 'geral') {
-      useDeveloper = false;
-    } else {
-      const totalDeveloper = reliable.reduce((s, m) => s + m.cycleTimeDays, 0);
-      const totalGeneral = reliable.reduce((s, m) => s + m.generalDays, 0);
-      useDeveloper = totalDeveloper > totalGeneral;
-    }
-    stageByName.set(name, useDeveloper ? 'desenvolvimento' : 'geral');
-  }
-
   // One shared "fast" cutoff for the whole team this sprint — the median
-  // duration (in each person's own stage) across everyone's non-suspicious
-  // completed items — so "rápido" means the same thing for everyone being
-  // compared, instead of each person being judged against their own best.
+  // Cycle Time (da rede de colunas, o mesmo do Dashboard) across everyone's
+  // non-suspicious completed items — so "rápido" means the same thing for
+  // everyone being compared, instead of each person being judged against
+  // their own best.
   const allDurations: number[] = [];
-  for (const [name, value] of byName.entries()) {
-    const stage = stageByName.get(name);
-    if (stage == null) continue;
+  for (const value of byName.values()) {
     for (const m of value) {
       if (m.isSuspicious) continue;
-      allDurations.push(stage === 'desenvolvimento' ? m.cycleTimeDays : m.generalDays);
+      allDurations.push(m.inProgressCycleDays);
     }
   }
   const teamMedianDuration = allDurations.length === 0 ? null : medianOf(allDurations);
@@ -634,12 +606,10 @@ export function buildHealthScoreRanking(params: {
     const noDeadlineItems = completed.filter((m) => m.isOnTime == null);
     const predictabilityScore = (onTimeItems.length / completed.length) * 100;
 
-    const stage = stageByName.get(name) ?? null;
-    const durationOf = (m: ItemMetric) => (stage === 'desenvolvimento' ? m.cycleTimeDays : m.generalDays);
     const fastItems =
       teamMedianDuration == null
         ? []
-        : completed.filter((m) => !m.isSuspicious && durationOf(m) <= teamMedianDuration);
+        : completed.filter((m) => !m.isSuspicious && m.inProgressCycleDays <= teamMedianDuration);
     const notFastItems = completed.filter((m) => !fastItems.includes(m));
     const speedScore = (fastItems.length / completed.length) * 100;
 
@@ -661,7 +631,7 @@ export function buildHealthScoreRanking(params: {
       noDeadlineItems,
       fastItems,
       notFastItems,
-      speedStage: stage,
+      teamMedianDays: teamMedianDuration,
     });
   });
   rows.sort((a, b) => b.score - a.score);

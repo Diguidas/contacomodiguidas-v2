@@ -188,6 +188,29 @@ export class WorkItem {
     return null;
   }
 
+  // Each continuous passage through `columns`, in order — a "stint" runs
+  // from the card entering any of the columns until it leaves them all, so
+  // hopping between two columns of the same set (e.g. Desenvolvimento ->
+  // Em Correção) stays one stint. A stint still open at `until` (defaults
+  // to now) is closed there.
+  stintsInColumns(columns: Set<string>, until?: Date): { start: Date; end: Date }[] {
+    const endTime = until ?? new Date();
+    const stints: { start: Date; end: Date }[] = [];
+    let open: Date | null = null;
+    for (const change of this.boardColumnHistory) {
+      if (change.date.getTime() > endTime.getTime()) break;
+      const inside = boardColumnMatches(columns, change.state);
+      if (inside && open == null) {
+        open = change.date;
+      } else if (!inside && open != null) {
+        stints.push({ start: open, end: change.date });
+        open = null;
+      }
+    }
+    if (open != null) stints.push({ start: open, end: endTime });
+    return stints;
+  }
+
   // Total wall-clock time this item's board column was one of `columns`,
   // summed across every interval up to `until` (defaults to now). This is
   // the "only counts time actually sitting in these columns" rule — periods

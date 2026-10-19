@@ -127,20 +127,23 @@ export class ItemMetric {
     return this.totalDays - this.triageDays - this.backlogDays;
   }
 
-  /** Time actually worked on the item, by either the developer or the
-   * analyst — Desenvolvedor + Geral, the two stages that are someone's own
-   * judgment call on this card, as opposed to Triagem/Fila/Usuário/Fornecedor
-   * which are waiting on something outside their control. Backlog and Request
-   * sit inside Geral but are waiting too, so they're subtracted. Only used for flow
-   * efficiency — `cycleTimeDays` elsewhere in the app stays developer-only. */
+  /** Time actually worked on the item: the Cycle Time da rede
+   * (`inProgressCycleDays`, everything except Triagem/New/Backlog/...)
+   * minus the stretches spent waiting on someone else — the dev queue, the
+   * requesting user, the vendor — and Request. Built on the same network as
+   * every other Cycle Time, so it doesn't depend on which columns happen to
+   * be filed under "Geral" in the settings. */
   get workedDays(): number {
-    return Math.max(0, this.cycleTimeDays + this.generalDays - this.backlogDays - this.requestDays);
+    return Math.max(
+      0,
+      this.inProgressCycleDays - this.queueDays - this.userDays - this.vendorDays - this.requestDays,
+    );
   }
 
   /** Flow efficiency: the fraction of the item's total elapsed time that was
    * actually spent being worked on (developer + analyst time) rather than
-   * waiting. 100% would mean it never left Desenvolvimento/Em Correção/Geral;
-   * most real flows sit well below that. */
+   * waiting. 100% would mean it spent every minute of its Cycle Time working,
+   * with no waiting on queue/user/vendor; most real flows sit well below that. */
   get flowEfficiencyPercent(): number {
     return this.totalDays > 0 ? (this.workedDays / this.totalDays) * 100 : 0;
   }

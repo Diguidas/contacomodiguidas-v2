@@ -453,6 +453,7 @@ export function DashboardScreen({
         <div style={{ height: 20 }} />
         <ColumnAverageCard summary={last30DaysSummary()} personName={selectedSpecificPerson ?? 'responsável'} />
         <div style={{ height: 20 }} />
+        <ReworkSection summary={summary} settings={settings} selectedSpecificPerson={selectedSpecificPerson} onSelectItem={setDetailItem} />
         <TaggedQueueSection selectedSpecificPerson={selectedSpecificPerson} settings={settings} groupSummary={groupSummary} selectedSprint={selectedSprint} />
         <ChartsRow summary={summary} onSeeDetails={() => completedSectionRef.current?.scrollIntoView({ behavior: 'smooth' })} />
         <div style={{ height: 20 }} />
@@ -978,6 +979,144 @@ function ColumnAverageCard({ summary, personName }: { summary: MetricsSummary; p
               <div style={{ fontSize: 20, fontWeight: 'bold' }}>{r.avgDays.toFixed(1)}d</div>
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Retrabalho em Desenvolvimento: dos cards concluídos na sprint que
+ * passaram por Desenvolvedor, quantos fecharam de primeira e quantos
+ * voltaram pra cá depois de sair (ex.: reprovado na validação), e quanto
+ * tempo cada tipo de passagem levou. */
+// Passagens de menos de 5 min por Desenvolvedor são arrasto do card pelo
+// quadro, não trabalho — ficam fora da conta.
+const MIN_STINT_MS = 5 * 60 * 1000;
+
+function ReworkSection({
+  summary,
+  settings,
+  selectedSpecificPerson,
+  onSelectItem,
+}: {
+  summary: MetricsSummary;
+  settings: AppSettings;
+  selectedSpecificPerson: string | null;
+  onSelectItem: (m: ItemMetric) => void;
+}) {
+  // Só faz sentido para o desenvolvedor — para os demais responsáveis o
+  // bloco não aparece (mesma regra da fila com a tag).
+  if (selectedSpecificPerson?.trim().toLowerCase() !== settings.myDisplayName.trim().toLowerCase()) return null;
+  const all = summary.completed.map((m) => {
+    const stints = m.item
+      .stintsInColumns(settings.developerColumnSet, m.endDate ?? undefined)
+      .filter((s) => s.end.getTime() - s.start.getTime() >= MIN_STINT_MS);
+    return {
+      m,
+      stints,
+      firstDays: stints.length > 0 ? (stints[0].end.getTime() - stints[0].start.getTime()) / MS_PER_DAY : 0,
+      returnDays: stints.slice(1).map((s) => (s.end.getTime() - s.start.getTime()) / MS_PER_DAY),
+    };
+  });
+  if (all.length === 0) return null;
+  const rows = all.filter((r) => r.stints.length > 0);
+  const noDev = all.length - rows.length;
+
+  const returned = rows.filter((r) => r.stints.length > 1).sort((a, b) => b.stints.length - a.stints.length);
+  const direct = rows.length - returned.length;
+  const avg = (xs: number[]) => (xs.length > 0 ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+  const fmt = (v: number | null) => (v != null ? formatDuration(v) : "—");
+  const returnStints = returned.flatMap((r) => r.returnDays);
+  const pct = rows.length > 0 ? Math.round((returned.length / rows.length) * 100) : 0;
+  const situation = (r: (typeof all)[number]) => (r.stints.length === 0 ? 'Sem Dev' : r.stints.length > 1 ? 'Voltou' : 'Direto');
+  const order = { Voltou: 0, Direto: 1, 'Sem Dev': 2 } as const;
+  const listed = [...all].sort((a, b) => order[situation(a)] - order[situation(b)]);
+
+  const cards = [
+    <StatCard
+      key="first"
+      title="1ª passagem em Dev"
+      subtitle={`média, ${rows.length} ${rows.length === 1 ? 'item' : 'itens'}`}
+      value={fmt(avg(rows.map((r) => r.firstDays)))}
+      icon={<Zap size={18} strokeWidth={1.75} />}
+      color={BrandColors.developer}
+    />,
+    <StatCard
+      key="back"
+      title="Quando volta p/ Dev"
+      subtitle={`média por retorno, ${returnStints.length} ${returnStints.length === 1 ? 'retorno' : 'retornos'}`}
+      value={fmt(avg(returnStints))}
+      icon={<ArrowLeftRight size={18} strokeWidth={1.75} />}
+      color={BrandColors.danger}
+    />,
+    <StatCard
+      key="direct"
+      title="Concluídos direto"
+      subtitle={noDev > 0 ? `nunca voltaram pra Dev (+${noDev} sem passagem por Dev)` : 'nunca voltaram pra Dev'}
+      value={direct}
+      icon={<CheckCircle2 size={18} strokeWidth={1.75} />}
+      color={BrandColors.user}
+    />,
+    <StatCard
+      key="returned"
+      title="Voltaram p/ Dev"
+      subtitle={`${pct}% dos concluídos que passaram por Dev`}
+      value={returned.length}
+      icon={<ArrowLeftRight size={18} strokeWidth={1.75} />}
+      color={BrandColors.danger}
+    />,
+  ];
+
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <StatGroup label="Retrabalho em Desenvolvimento — concluídos na sprint" cards={cards} />
+      {all.length > 0 && (
+        <div style={{ ...cardStyle(), marginTop: 12 }}>
+          <div style={{ fontSize: 14, fontWeight: 'bold', color: BrandColors.developer }}>
+            Os {all.length} concluídos na sprint · {direct} direto · {returned.length} voltaram · {noDev} sem passagem por Dev
+          </div>
+          <div style={{ height: 10 }} />
+          <div style={{ overflowX: 'auto' }}>
+            <table style={tableStyle()}>
+              <thead>
+                <tr>
+                  <Th>ID</Th>
+                  <Th>Título</Th>
+                  <Th>Responsável</Th>
+                  <Th>Situação</Th>
+                  <Th>Coluna atual</Th>
+                  <Th numeric>1ª passagem</Th>
+                  <Th numeric>Retornos</Th>
+                  <Th numeric>Tempo nos retornos</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {listed.map((r) => (
+                  <tr key={r.m.item.id} onClick={() => onSelectItem(r.m)} style={{ cursor: 'pointer' }}>
+                    <Td>{r.m.item.id}</Td>
+                    <Td>
+                      <span style={{ display: 'inline-block', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {r.m.item.title}
+                      </span>
+                    </Td>
+                    <Td>
+                      <ResponsibleTag name={r.m.item.assignedTo} />
+                    </Td>
+                    <Td>
+                      <ColoredTag
+                        label={situation(r)}
+                        color={situation(r) === 'Voltou' ? BrandColors.danger : situation(r) === 'Direto' ? BrandColors.user : '#64748B'}
+                      />
+                    </Td>
+                    <Td>{r.m.item.currentBoardColumn}</Td>
+                    <Td numeric>{r.stints.length > 0 ? formatDuration(r.firstDays) : '—'}</Td>
+                    <Td numeric>{r.returnDays.length}</Td>
+                    <Td numeric>{r.returnDays.length > 0 ? formatDuration(r.returnDays.reduce((a, b) => a + b, 0)) : '—'}</Td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

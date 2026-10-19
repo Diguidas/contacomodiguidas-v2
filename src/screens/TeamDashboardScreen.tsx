@@ -882,6 +882,11 @@ export function TeamDashboardScreen({
                 subtitle={`Um número só por responsável, pra saber rápido quem merece uma olhada mais de perto — média de Rastreabilidade (não suspeitos / concluídos), Previsibilidade (no prazo / concluídos) e Velocidade (rápidos, excluindo suspeitos / concluídos). Os 3 usam o mesmo denominador — total de concluídos — pra ficar comparável entre pessoas. Só entra quem tem pelo menos ${HEALTH_SCORE_MIN_COMPLETED} concluídos, pra uma amostra pequena não inflar o score. Clique numa linha pra ver item a item. Não substitui os rankings abaixo, só resume.`}
               />
               <div style={{ height: 12 }} />
+              {healthScoreRanking.length > 0 && healthScoreRanking[0].teamMedianDays != null && (
+                <div style={{ fontSize: 13, marginBottom: 10 }}>
+                  <b>Mediana do time (Cycle Time da rede):</b> {formatDuration(healthScoreRanking[0].teamMedianDays)} — quem concluiu um card em até esse tempo conta como rápido.
+                </div>
+              )}
               <HealthScoreTable rows={healthScoreRanking} onSelect={setHealthDetailRow} />
               <div style={{ height: 28 }} />
               <SectionHeader
@@ -2446,8 +2451,6 @@ function ScoreBadge({ label, tone }: { label: string; tone: 'good' | 'bad' | 'ne
  * and which it didn't ("não por conta disso"), so every percentage in the
  * summary row can be checked against the same list everyone else's is. */
 function HealthScoreDetailDialog({ row, onClose }: { row: HealthScoreRanking; onClose: () => void }) {
-  const stageName = row.speedStage === 'desenvolvimento' ? 'Desenvolvimento' : row.speedStage === 'geral' ? 'Geral' : null;
-
   return (
     <Modal title={`Health Score — ${row.name}`} width={760} onClose={onClose}>
       <div style={{ fontSize: 12, color: '#64748B', marginBottom: 4 }}>
@@ -2461,7 +2464,7 @@ function HealthScoreDetailDialog({ row, onClose }: { row: HealthScoreRanking; on
           <b>Previsibilidade {row.predictabilityScore.toFixed(0)}%</b> — {row.onTimeItems.length}/{row.completedItems.length} no prazo
         </span>
         <span style={{ fontSize: 12.5 }}>
-          <b>Velocidade {row.speedScore.toFixed(0)}%</b> — {row.fastItems.length}/{row.completedItems.length} rápidos {stageName && `(mediana em ${stageName})`}
+          <b>Velocidade {row.speedScore.toFixed(0)}%</b> — {row.fastItems.length}/{row.completedItems.length} rápidos (Cycle Time ≤ mediana do time{row.teamMedianDays != null && `: ${formatDuration(row.teamMedianDays)}`})
         </span>
       </div>
       {row.completedItems.length === 0 ? (
@@ -2501,9 +2504,9 @@ function HealthScoreDetailDialog({ row, onClose }: { row: HealthScoreRanking; on
                     {suspicious ? (
                       <ScoreBadge label="Suspeito — não conta" tone="bad" />
                     ) : fast ? (
-                      <ScoreBadge label={`Rápido (${formatDuration(row.speedStage === 'desenvolvimento' ? m.cycleTimeDays : m.generalDays)}) — conta`} tone="good" />
+                      <ScoreBadge label={`Rápido (${formatDuration(m.inProgressCycleDays)}) — conta`} tone="good" />
                     ) : (
-                      <ScoreBadge label={`Não rápido (${formatDuration(row.speedStage === 'desenvolvimento' ? m.cycleTimeDays : m.generalDays)})`} tone="neutral" />
+                      <ScoreBadge label={`Não rápido (${formatDuration(m.inProgressCycleDays)})`} tone="neutral" />
                     )}
                   </Td>
                 </tr>
