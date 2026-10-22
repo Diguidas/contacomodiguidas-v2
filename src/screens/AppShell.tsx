@@ -9,7 +9,6 @@ import { loadWorkItemCache, saveWorkItemCache } from '../services/workItemCache'
 import type { AppUser } from '../services/authService';
 import { Sprint, SprintService } from '../services/sprintService';
 import { BrandColors } from '../theme';
-import abapinhoLogo from '../assets/abapinho.png';
 import poletechBadge from '../assets/poletech.png';
 import { DashboardScreen } from './DashboardScreen';
 import { TeamDashboardScreen } from './TeamDashboardScreen';
@@ -314,7 +313,7 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
             </button>
           )}
         </div>
-        <img src={abapinhoLogo} alt="Conta com o Diguidas" style={{ height: 32, objectFit: 'contain' }} />
+        <span style={{ fontSize: 20, fontWeight: 800, color: BrandColors.primary, letterSpacing: -0.5 }}>Pole Performance</span>
         <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 12 }}>
           <button
             onClick={() => refresh()}

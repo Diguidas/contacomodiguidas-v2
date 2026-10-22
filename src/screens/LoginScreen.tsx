@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { signInWithMicrosoft } from '../services/authService';
 import { BrandColors } from '../theme';
-import abapinhoLogo from '../assets/abapinho.png';
 
 /** The door into the app — Microsoft (Azure AD) via Supabase; AuthGate
  * decides afterward whether that email actually has access (see
@@ -26,7 +25,7 @@ export function LoginScreen({ error }: { error?: string | null }) {
   return (
     <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: BrandColors.background }}>
       <div style={{ backgroundColor: '#fff', border: `1px solid ${BrandColors.border}`, borderRadius: 16, padding: '40px 36px', width: 380, textAlign: 'center' }}>
-        <img src={abapinhoLogo} alt="" style={{ height: 90, objectFit: 'contain', margin: '0 auto' }} />
+        <span style={{ fontSize: 32, fontWeight: 800, color: BrandColors.primary, letterSpacing: -0.5, display: 'block' }}>Pole Performance</span>
         <div style={{ height: 28 }} />
 
         <div style={{ fontSize: 14, color: '#64748B' }}>Entre com sua conta Microsoft do Pole pra continuar.</div>

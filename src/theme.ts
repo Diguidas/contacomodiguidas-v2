@@ -1,4 +1,4 @@
-// Palette for "Conta com o Diguidas" — a professional SaaS look: strong
+// Palette for "Pole Performance" — a professional SaaS look: strong
 // orange brand, white/light-gray surfaces, and one distinct color per
 // time category.
 export const BrandColors = {

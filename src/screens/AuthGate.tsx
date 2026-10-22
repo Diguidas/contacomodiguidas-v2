@@ -6,7 +6,6 @@ import type { AppUser } from '../services/authService';
 import { LoginScreen } from './LoginScreen';
 import { AppShell } from './AppShell';
 import { BrandColors } from '../theme';
-import abapinhoLogo from '../assets/abapinho.png';
 
 /** Root gate: nothing in the app renders before this resolves who's asking.
  * Three states — signed out (LoginScreen), signed in but not in app_users
@@ -78,7 +77,7 @@ export function AuthGate() {
   if (checkingSession) {
     return (
       <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16 }}>
-        <img src={abapinhoLogo} alt="" style={{ height: 70, objectFit: 'contain' }} />
+        <span style={{ fontSize: 28, fontWeight: 800, color: BrandColors.primary, letterSpacing: -0.5 }}>Pole Performance</span>
         <span style={{ color: '#64748B', fontSize: 13 }}>Carregando...</span>
         {stuck && (
           <>

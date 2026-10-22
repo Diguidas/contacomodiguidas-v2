@@ -23,7 +23,6 @@ import { AppSettings } from '../services/settingsService';
 import { Sprint, SprintService } from '../services/sprintService';
 import { overdueForSprint, sprintCutoff } from '../services/sprintSnapshotService';
 import { BrandColors } from '../theme';
-import abapinhoLogo from '../assets/abapinho.png';
 import {
   AlertTriangle,
   ArrowLeftRight,
@@ -367,7 +366,7 @@ export function DashboardScreen({
     return (
       <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
         <div style={{ textAlign: 'center', maxWidth: 360 }}>
-          <img src={abapinhoLogo} alt="" style={{ height: 90, objectFit: 'contain' }} />
+          <span style={{ fontSize: 32, fontWeight: 800, color: BrandColors.primary, letterSpacing: -0.5 }}>Pole Performance</span>
           <div style={{ height: 24 }} />
           <p style={{ fontWeight: 600 }}>Configure a Conexão para começar.</p>
         </div>
