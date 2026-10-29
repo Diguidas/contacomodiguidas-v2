@@ -15,9 +15,7 @@ import {
   attributedGroupBy,
   buildHealthScoreRanking,
   buildPerformanceRanking,
-  defaultPerformanceGroupKeys,
   HealthScoreRanking,
-  performanceGroups,
   ResponsiblePerformance,
   sprintCutoff,
 } from '../services/sprintSnapshotService';
@@ -297,7 +295,6 @@ export function TeamDashboardScreen({
     onTabChange?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
-  const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set(defaultPerformanceGroupKeys));
   const [discountedRequestTypes, setDiscountedRequestTypes] = useState<Set<string>>(new Set());
   const [discountSuspicious, setDiscountSuspicious] = useState(false);
   const [breakdownDialog, setBreakdownDialog] = useState<{ label: string; metrics: ItemMetric[] } | null>(null);
@@ -404,7 +401,7 @@ export function TeamDashboardScreen({
   // pequena demais pra dizer qualquer coisa sobre desempenho real.
   const PERFORMANCE_MIN_BASE = 3;
   const performanceRanking = (() => {
-    const rows = buildPerformanceRanking({ items: sprintScopedItems, settings, selectedGroupKeys: selectedGroups, asOf }).filter(
+    const rows = buildPerformanceRanking({ items: sprintScopedItems, settings, asOf }).filter(
       (r) => r.base >= PERFORMANCE_MIN_BASE,
     );
     rows.sort((a, b) => (b.percent !== a.percent ? b.percent - a.percent : b.base - a.base));
@@ -893,27 +890,8 @@ export function TeamDashboardScreen({
                 icon={<Trophy size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.primary}
                 title="Ranking de performance"
-                subtitle={`Base = itens atribuídos, em aberto numa das colunas marcadas abaixo (ou já concluídos, não importa a coluna) + itens de outra pessoa com sua tag que foram concluídos. Só entra no ranking quem tem Base de pelo menos ${PERFORMANCE_MIN_BASE} itens, pra uma amostra pequena não inflar posição.`}
+                subtitle={`Base = todos os itens atribuídos, exceto removidos, sem retorno do usuário e os ainda em aberto em Aguardando Fornecedor + itens de outra pessoa com sua tag que foram concluídos. Só entra no ranking quem tem Base de pelo menos ${PERFORMANCE_MIN_BASE} itens, pra uma amostra pequena não inflar posição.`}
               />
-              <div style={{ height: 12 }} />
-              <FilterBox message='Cada chip é uma coluna do board. Marcado = itens ainda abertos ali contam no Base de quem está com eles agora. Desmarcado = eles somem da conta enquanto ficarem nessa coluna (mas contam quando forem concluídos, seja qual for a coluna). Passe o mouse num chip pra ver o que ele representa.'>
-                {performanceGroups.map((g) => (
-                  <span key={g.key} title={g.description}>
-                    <ToggleChip
-                      label={g.label}
-                      selected={selectedGroups.has(g.key)}
-                      onSelected={(selected) => {
-                        setSelectedGroups((prev) => {
-                          const next = new Set(prev);
-                          if (selected) next.add(g.key);
-                          else next.delete(g.key);
-                          return next;
-                        });
-                      }}
-                    />
-                  </span>
-                ))}
-              </FilterBox>
               <div style={{ height: 12 }} />
               <FilterBox message='Concluídos líquidos: desmarque um tipo de solicitação pra ele não contar como entrega de verdade (ex: chamados de Suporte simples), e/ou desconte os itens suspeitos — quem "infla" o número com entregas fracas perde posição no % líquido, sem sumir da Base.'>
                 <ToggleChip label="Descontar suspeitos" selected={discountSuspicious} onSelected={setDiscountSuspicious} icon="⊘" />

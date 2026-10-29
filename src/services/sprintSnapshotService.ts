@@ -393,17 +393,16 @@ export class ResponsiblePerformance {
 }
 
 // Builds the per-responsible performance ranking for `items` — the same
-// rules as Visão do time: a chip must be checked for an *open* item's stage
-// to count against its holder (finished items always count), plus
+// rules as Visão do time: every non-cancelled item counts except open ones
+// in Aguardando Fornecedor (finished items always count), plus
 // isAttributedTo's extra credit for AppSettings.myDisplayName on
 // tag-only items (see isAttributedTo for the exact rule).
 export function buildPerformanceRanking(params: {
   items: WorkItem[];
   settings: AppSettings;
-  selectedGroupKeys: Set<string>;
   asOf?: Date | null;
 }): ResponsiblePerformance[] {
-  const { items, settings, selectedGroupKeys, asOf } = params;
+  const { items, settings, asOf } = params;
   const calculator = new MetricsCalculator({
     triageColumns: settings.triageColumnSet,
     queueColumns: settings.queueColumnSet,
@@ -419,16 +418,16 @@ export function buildPerformanceRanking(params: {
     .filter((i) => i.type.trim().toLowerCase() === 'user story');
   const allMetrics = calculator.calculate(valid, asOf ?? undefined).metrics;
 
-  function matchesSelectedGroups(m: ItemMetric): boolean {
+  // Fixed Base: everything not cancelled (Removed / Sem retorno do usuário
+  // are already dropped via isCancelled above) except open items parked in
+  // Aguardando Fornecedor — out of the responsible's hands.
+  function countsInBase(m: ItemMetric): boolean {
     if (m.done) return true;
-    const column = m.item.currentBoardColumn;
-    return performanceGroups.some(
-      (g) => selectedGroupKeys.has(g.key) && boardColumnMatches(g.columnsOf(settings), column),
-    );
+    return !boardColumnMatches(settings.vendorColumnSet, m.item.currentBoardColumn);
   }
 
   const byName = new Map<string, ItemMetric[]>();
-  for (const m of allMetrics.filter(matchesSelectedGroups)) {
+  for (const m of allMetrics.filter(countsInBase)) {
     const name = m.item.assignedTo.trim();
     if (name === '') continue;
     if (!byName.has(name)) byName.set(name, []);
