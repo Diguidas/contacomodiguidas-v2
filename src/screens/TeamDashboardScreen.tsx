@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Bar, BarChart, CartesianGrid, Cell, LabelList, Pie, PieChart, ResponsiveContainer, XAxis, YAxis } from 'recharts';
 import { boardColumnMatches, WorkItem } from '../models/workItem';
-import { formatDuration, ItemMetric, MetricsCalculator } from '../services/metricsService';
+import { formatDuration, ItemMetric, MetricsCalculator, MetricsSummary } from '../services/metricsService';
 import {
   backlogToDoneDays,
   complexityLabelOf,
@@ -13,14 +13,13 @@ import { AppSettings } from '../services/settingsService';
 import { Sprint } from '../services/sprintService';
 import {
   attributedGroupBy,
-  buildHealthScoreRanking,
   buildPerformanceRanking,
-  HealthScoreRanking,
   ResponsiblePerformance,
   sprintCutoff,
 } from '../services/sprintSnapshotService';
 import { BrandColors } from '../theme';
 import { FilterBox, ToggleChip } from '../components/ToggleChip';
+import '../team-nav.css';
 import {
   AlertTriangle,
   BarChart3,
@@ -29,7 +28,6 @@ import {
   CheckCircle2,
   Clock,
   EyeOff,
-  HeartPulse,
   Hourglass,
   Inbox,
   LayoutList,
@@ -41,6 +39,28 @@ import {
   X,
   Zap,
 } from 'lucide-react';
+
+type TeamTab = 0 | 1 | 2 | 3;
+const TEAM_TAB_KEY = 'team:tab';
+
+function loadStoredTab(): TeamTab {
+  try {
+    const stored = Number(sessionStorage.getItem(TEAM_TAB_KEY));
+    if (stored === 0 || stored === 1 || stored === 2 || stored === 3) return stored;
+  } catch {
+    // sessionStorage unavailable — fall through to the default.
+  }
+  return 0;
+}
+
+// Scroll position of each tab, kept while the app stays open so leaving the
+// screen (it unmounts) and coming back lands where you were.
+const savedScroll: Record<number, number> = {};
+
+/** Invisible marker the side menu scrolls to. */
+function Anchor({ id }: { id: string }) {
+  return <div id={`team-${id}`} />;
+}
 
 function hexAlpha(hex: string, alpha: number): string {
   const h = hex.replace('#', '');
@@ -284,17 +304,44 @@ export function TeamDashboardScreen({
   ratingsLoading: boolean;
 }) {
   const preferredAreaOrder = ['Sustentação', 'Dados'];
-  const [tab, setTab] = useState<0 | 1 | 2 | 3>(0);
-  // This screen scrolls internally (its own `overflow: auto` body below the
-  // fixed header/tab bar) rather than through the shell's shared content
-  // div, so resetting the shell's scroll on tab change doesn't reach it —
-  // it needs its own ref reset too.
+  // The open section survives leaving this screen and coming back (and a
+  // reload): without it, every visit started over on Visão geral.
+  const [tab, setTabState] = useState<TeamTab>(loadStoredTab);
+  const [activeAnchor, setActiveAnchor] = useState<string | null>(null);
+  const [anchorRequest, setAnchorRequest] = useState<{ id: string; n: number } | null>(null);
+  // This screen scrolls internally (its own `overflow: auto` body next to the
+  // side menu) rather than through the shell's shared content div, so
+  // resetting the shell's scroll on tab change doesn't reach it — it needs
+  // its own ref reset too.
   const bodyRef = useRef<HTMLDivElement>(null);
+
+  /** Switches section; with `anchor`, also scrolls straight to that block. */
+  function goTo(next: TeamTab, anchor?: string) {
+    setActiveAnchor(anchor ?? null);
+    if (next !== tab) {
+      setTabState(next);
+      try {
+        sessionStorage.setItem(TEAM_TAB_KEY, String(next));
+      } catch {
+        // Ignore — losing this just means starting on Visão geral next time.
+      }
+    }
+    if (anchor) setAnchorRequest((prev) => ({ id: anchor, n: (prev?.n ?? 0) + 1 }));
+  }
+
   useEffect(() => {
-    bodyRef.current?.scrollTo(0, 0);
+    // Back to where this tab was left (top the first time) — not always to the top.
+    bodyRef.current?.scrollTo(0, savedScroll[tab] ?? 0);
     onTabChange?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
+
+  // Declared after the tab effect so, when a click both changes tab and
+  // targets a block, the jump to the block is the last scroll to run.
+  useEffect(() => {
+    if (anchorRequest == null) return;
+    document.getElementById(`team-${anchorRequest.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [anchorRequest]);
   const [discountedRequestTypes, setDiscountedRequestTypes] = useState<Set<string>>(new Set());
   const [discountSuspicious, setDiscountSuspicious] = useState(false);
   const [breakdownDialog, setBreakdownDialog] = useState<{ label: string; metrics: ItemMetric[] } | null>(null);
@@ -306,7 +353,6 @@ export function TeamDashboardScreen({
     projectOf?: (m: ItemMetric) => WorkItem | null;
   } | null>(null);
   const [perfDialog, setPerfDialog] = useState<ResponsiblePerformance | null>(null);
-  const [healthDetailRow, setHealthDetailRow] = useState<HealthScoreRanking | null>(null);
   const [tagDetailRow, setTagDetailRow] = useState<TagRankingRow | null>(null);
 
   const asOf = selectedSprint == null ? undefined : sprintCutoff(selectedSprint);
@@ -661,14 +707,6 @@ export function TeamDashboardScreen({
     });
   })();
 
-  // Mesmo corte do Ranking de performance: sem um mínimo de concluídos,
-  // alguém com 1 item perfeito (100/100/100) fica acima de quem tem uma
-  // amostra grande e consistente, mas não perfeita.
-  const HEALTH_SCORE_MIN_COMPLETED = 3;
-  const healthScoreRanking: HealthScoreRanking[] = buildHealthScoreRanking({ items: sprintScopedItems, settings, asOf }).filter(
-    (r) => r.completedItems.length >= HEALTH_SCORE_MIN_COMPLETED,
-  );
-
   function waitRanking(metrics: ItemMetric[], daysOf: (m: ItemMetric) => number): WaitRanking[] {
     const byName = groupBy(metrics, (m) => m.item.assignedTo.trim());
     byName.delete('');
@@ -716,6 +754,17 @@ export function TeamDashboardScreen({
   const requestTypesAll = [...byRequestTypeAll.keys()].sort();
   const oldest = [...openMetrics].sort((a, b) => b.totalDays - a.totalDays);
 
+  // Cards that pushed the team's Cycle Time up: concluded in the selected
+  // sprint (same set and same number the area tiles average) and far above
+  // what's typical — see MetricsSummary.cycleTimeOutliers for the cutoff.
+  const cycleTimeOutlierInfo = new MetricsSummary(
+    areaCardMetrics.filter((m) => endedInSprintLocal(m, selectedSprint)),
+  ).cycleTimeOutliers((m) => m.inProgressCycleDays, 5);
+  const cycleTimeOffenders = cycleTimeOutlierInfo?.outliers.map((o) => o.metric) ?? [];
+  const cycleTimeOffendersSubtitle = cycleTimeOutlierInfo
+    ? 'Concluídos na sprint com Cycle Time muito acima do normal, os que mais pesam na média (máx. 5).'
+    : 'Concluídos na sprint com Cycle Time muito acima do normal. Precisa de pelo menos 5 concluídos na sprint pra calcular o corte.';
+
   const vendorMetrics = allMetrics
     .filter((m) => !m.done && boardColumnMatches(settings.vendorColumnSet, m.item.currentBoardColumn))
     .sort((a, b) => b.vendorDays - a.vendorDays);
@@ -745,15 +794,22 @@ export function TeamDashboardScreen({
             </select>
           </div>
           <div style={{ height: 10 }} />
-          <TeamTabBar tab={tab} setTab={setTab} />
-          <div style={{ height: 8 }} />
         </div>
       </div>
       <div style={{ height: 1, backgroundColor: BrandColors.border }} />
-      <div ref={bodyRef} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 16 }}>
+      <div className="team-layout">
+      <TeamSideNav tab={tab} activeAnchor={activeAnchor} onGo={goTo} />
+      <div
+        ref={bodyRef}
+        className="team-body"
+        onScroll={(e) => {
+          savedScroll[tab] = e.currentTarget.scrollTop;
+        }}
+      >
         <div style={{ maxWidth: 1500, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 0 }}>
           {tab === 0 && (
             <>
+              <Anchor id="ov-area" />
               <ComparisonPanel
                 title="Comparativo por área"
                 allLabel="Todas as áreas"
@@ -765,6 +821,7 @@ export function TeamDashboardScreen({
                 onTileClick={(label, metrics) => setBreakdownDialog({ label, metrics })}
               />
               <div style={{ height: 28 }} />
+              <Anchor id="ov-dist" />
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'flex-start' }}>
                 <div style={{ flex: '1 1 320px' }}>
                   <DistributionPieCard
@@ -782,6 +839,7 @@ export function TeamDashboardScreen({
                 </div>
               </div>
               <div style={{ height: 28 }} />
+              <Anchor id="ov-cross" />
               <SectionHeader
                 icon={<LayoutList size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.total}
@@ -795,6 +853,21 @@ export function TeamDashboardScreen({
                 onSelect={(label, metrics) => setBreakdownDialog({ label, metrics })}
               />
               <div style={{ height: 28 }} />
+              <Anchor id="ov-offenders" />
+              <SectionHeader
+                icon={<Clock size={17} strokeWidth={1.75} />}
+                iconColor={BrandColors.danger}
+                title="Cards que puxaram o Cycle Time do time"
+                subtitle={cycleTimeOffendersSubtitle}
+              />
+              <div style={{ height: 12 }} />
+              <ItemListTable
+                metrics={cycleTimeOffenders}
+                valueLabel="Cycle Time"
+                valueSelector={(m) => m.inProgressCycleDays}
+              />
+              <div style={{ height: 28 }} />
+              <Anchor id="ov-groups" />
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'flex-start' }}>
                 <div style={{ flex: '1 1 380px' }}>
                   <GroupCountTable
@@ -818,6 +891,7 @@ export function TeamDashboardScreen({
                 </div>
               </div>
               <div style={{ height: 36 }} />
+              <Anchor id="ov-aging" />
               <SectionHeader
                 icon={<BarChart3 size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.developer}
@@ -827,6 +901,7 @@ export function TeamDashboardScreen({
               <div style={{ height: 12 }} />
               <AgingBucketTable byArea={byAreaOpen} areas={areas} onCellClick={(label, metrics) => setBreakdownDialog({ label, metrics })} />
               <div style={{ height: 28 }} />
+              <Anchor id="ov-oldest" />
               <SectionHeader icon={<Clock size={17} strokeWidth={1.75} />} iconColor={BrandColors.queue} title="Cards mais antigos" />
               <div style={{ height: 12 }} />
               <ItemListTable metrics={oldest.slice(0, 10)} valueLabel="Dias aberto" valueSelector={(m) => m.totalDays} />
@@ -834,6 +909,7 @@ export function TeamDashboardScreen({
           )}
           {tab === 1 && (
             <>
+              <Anchor id="perf-wipcol" />
               <SectionHeader
                 icon={<LayoutList size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.developer}
@@ -843,6 +919,7 @@ export function TeamDashboardScreen({
               <div style={{ height: 12 }} />
               <WipByColumnChart data={wipByColumn} />
               <div style={{ height: 28 }} />
+              <Anchor id="perf-wip" />
               <SectionHeader
                 icon={<LayoutList size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.developer}
@@ -863,6 +940,7 @@ export function TeamDashboardScreen({
                 }
               />
               <div style={{ height: 28 }} />
+              <Anchor id="perf-orphans" />
               <SectionHeader
                 icon={<UserRound size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.warning}
@@ -872,20 +950,7 @@ export function TeamDashboardScreen({
               <div style={{ height: 12 }} />
               <ItemListTable metrics={unassignedOpenItems} valueLabel="Dias aberto" valueSelector={(m) => m.totalDays} />
               <div style={{ height: 28 }} />
-              <SectionHeader
-                icon={<HeartPulse size={17} strokeWidth={1.75} />}
-                iconColor={BrandColors.danger}
-                title="Health Score"
-                subtitle={`Um número só por responsável, pra saber rápido quem merece uma olhada mais de perto — média de Rastreabilidade (não suspeitos / concluídos), Previsibilidade (no prazo / concluídos) e Velocidade (rápidos, excluindo suspeitos / concluídos). Os 3 usam o mesmo denominador — total de concluídos — pra ficar comparável entre pessoas. Só entra quem tem pelo menos ${HEALTH_SCORE_MIN_COMPLETED} concluídos, pra uma amostra pequena não inflar o score. Clique numa linha pra ver item a item. Não substitui os rankings abaixo, só resume.`}
-              />
-              <div style={{ height: 12 }} />
-              {healthScoreRanking.length > 0 && healthScoreRanking[0].teamMedianDays != null && (
-                <div style={{ fontSize: 13, marginBottom: 10 }}>
-                  <b>Mediana do time (Cycle Time da rede):</b> {formatDuration(healthScoreRanking[0].teamMedianDays)} — quem concluiu um card em até esse tempo conta como rápido.
-                </div>
-              )}
-              <HealthScoreTable rows={healthScoreRanking} onSelect={setHealthDetailRow} />
-              <div style={{ height: 28 }} />
+              <Anchor id="perf-rank" />
               <SectionHeader
                 icon={<Trophy size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.primary}
@@ -918,6 +983,7 @@ export function TeamDashboardScreen({
                 onRowClick={setPerfDialog}
               />
               <div style={{ height: 28 }} />
+              <Anchor id="perf-suspicious" />
               <SectionHeader
                 icon={<EyeOff size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.danger}
@@ -950,6 +1016,7 @@ export function TeamDashboardScreen({
                 }
               />
               <div style={{ height: 28 }} />
+              <Anchor id="perf-predict" />
               <SectionHeader
                 icon={<Calendar size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.user}
@@ -981,6 +1048,7 @@ export function TeamDashboardScreen({
                 }
               />
               <div style={{ height: 28 }} />
+              <Anchor id="perf-triage" />
               <SectionHeader
                 icon={<Inbox size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.triage}
@@ -995,6 +1063,7 @@ export function TeamDashboardScreen({
                 }
               />
               <div style={{ height: 28 }} />
+              <Anchor id="perf-queue" />
               <SectionHeader
                 icon={<CheckCircle2 size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.queue}
@@ -1009,6 +1078,7 @@ export function TeamDashboardScreen({
                 }
               />
               <div style={{ height: 28 }} />
+              <Anchor id="perf-dev" />
               <SectionHeader
                 icon={<Zap size={17} strokeWidth={1.75} />}
                 iconColor={BrandColors.developer}
@@ -1022,7 +1092,7 @@ export function TeamDashboardScreen({
           {tab === 2 && (
             <>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
-                <div style={{ flex: '1 1 260px', minWidth: 260 }}>
+                <div id="team-wait-triage" style={{ flex: '1 1 260px', minWidth: 260 }}>
                   <SufferingCard
                     title="Triagem (gargalo)"
                     icon={<Inbox size={17} strokeWidth={1.75} />}
@@ -1034,7 +1104,7 @@ export function TeamDashboardScreen({
                     }
                   />
                 </div>
-                <div style={{ flex: '1 1 260px', minWidth: 260 }}>
+                <div id="team-wait-queue" style={{ flex: '1 1 260px', minWidth: 260 }}>
                   <SufferingCard
                     title="Liberado para Desenvolvimento"
                     icon={<CheckCircle2 size={17} strokeWidth={1.75} />}
@@ -1046,7 +1116,7 @@ export function TeamDashboardScreen({
                     }
                   />
                 </div>
-                <div style={{ flex: '1 1 260px', minWidth: 260 }}>
+                <div id="team-wait-user" style={{ flex: '1 1 260px', minWidth: 260 }}>
                   <SufferingCard
                     title="Aguardando Usuário"
                     icon={<UserRound size={17} strokeWidth={1.75} />}
@@ -1058,7 +1128,7 @@ export function TeamDashboardScreen({
                     }
                   />
                 </div>
-                <div style={{ flex: '1 1 260px', minWidth: 260 }}>
+                <div id="team-wait-vendor" style={{ flex: '1 1 260px', minWidth: 260 }}>
                   <SufferingCard
                     title="Aguardando Fornecedor"
                     icon={<Truck size={17} strokeWidth={1.75} />}
@@ -1072,10 +1142,12 @@ export function TeamDashboardScreen({
                 </div>
               </div>
               <div style={{ height: 28 }} />
+              <Anchor id="wait-vendor-list" />
               <SectionHeader icon={<Truck size={17} strokeWidth={1.75} />} iconColor={BrandColors.vendor} title="Aguardando Fornecedor" />
               <div style={{ height: 12 }} />
               <ItemListTable metrics={vendorMetrics} valueLabel="Dias aguardando" valueSelector={(m) => m.vendorDays} />
               <div style={{ height: 28 }} />
+              <Anchor id="wait-user-list" />
               <SectionHeader icon={<UserRound size={17} strokeWidth={1.75} />} iconColor={BrandColors.user} title="Aguardando Definição do Usuário" />
               <div style={{ height: 12 }} />
               <ItemListTable metrics={userWaitMetrics} valueLabel="Dias aguardando" valueSelector={(m) => m.userDays} />
@@ -1083,6 +1155,7 @@ export function TeamDashboardScreen({
           )}
           {tab === 3 && <RatingsTab ratingsLoading={ratingsLoading} />}
         </div>
+      </div>
       </div>
       {breakdownDialog && (
         <ResponsibleBreakdownDialog
@@ -1106,51 +1179,96 @@ export function TeamDashboardScreen({
         />
       )}
       {perfDialog && <PerformanceItemsDialog row={perfDialog} onClose={() => setPerfDialog(null)} />}
-      {healthDetailRow && <HealthScoreDetailDialog row={healthDetailRow} onClose={() => setHealthDetailRow(null)} />}
       {tagDetailRow && <TagRaioXDialog row={tagDetailRow} onClose={() => setTagDetailRow(null)} />}
     </div>
   );
 }
 
-/** Sits under the KPI strip, switching between the three tabs. */
-function TeamTabBar({ tab, setTab }: { tab: 0 | 1 | 2 | 3; setTab: (t: 0 | 1 | 2 | 3) => void }) {
-  const tabs: { icon: ReactNode; label: string }[] = [
-    { icon: <BarChart3 size={15} strokeWidth={2} />, label: 'Visão geral' },
-    { icon: <Trophy size={15} strokeWidth={2} />, label: 'Performance' },
-    { icon: <Hourglass size={15} strokeWidth={2} />, label: 'Gargalos e Esperas' },
-    { icon: <Star size={15} strokeWidth={2} />, label: 'Avaliação' },
-  ];
+/** Each tab of the screen with the blocks inside it — the ids match the
+ * <Anchor>s / `team-…` ids placed on those blocks above. */
+const TEAM_NAV: { icon: ReactNode; label: string; items: { id: string; label: string }[] }[] = [
+  {
+    icon: <BarChart3 size={16} strokeWidth={2} />,
+    label: 'Visão geral',
+    items: [
+      { id: 'ov-area', label: 'Comparativo por área' },
+      { id: 'ov-dist', label: 'Distribuição por complexidade e prioridade' },
+      { id: 'ov-cross', label: 'Complexidade x prioridade' },
+      { id: 'ov-offenders', label: 'Cards que puxaram o Cycle Time' },
+      { id: 'ov-groups', label: 'Por setor e tipo de demanda' },
+      { id: 'ov-aging', label: 'Aging' },
+      { id: 'ov-oldest', label: 'Cards mais antigos' },
+    ],
+  },
+  {
+    icon: <Trophy size={16} strokeWidth={2} />,
+    label: 'Performance',
+    items: [
+      { id: 'perf-wipcol', label: 'WIP por coluna' },
+      { id: 'perf-wip', label: 'Carga de trabalho (WIP)' },
+      { id: 'perf-orphans', label: 'Cards sem responsável' },
+      { id: 'perf-rank', label: 'Ranking de performance' },
+      { id: 'perf-suspicious', label: 'Itens suspeitos' },
+      { id: 'perf-predict', label: 'Previsibilidade de prazo' },
+      { id: 'perf-triage', label: 'Velocidade de Triagem' },
+      { id: 'perf-queue', label: 'Velocidade na fila' },
+      { id: 'perf-dev', label: 'Ranking de desenvolvimento' },
+    ],
+  },
+  {
+    icon: <Hourglass size={16} strokeWidth={2} />,
+    label: 'Gargalos e Esperas',
+    items: [
+      { id: 'wait-triage', label: 'Triagem (gargalo)' },
+      { id: 'wait-queue', label: 'Liberado para Desenvolvimento' },
+      { id: 'wait-user', label: 'Aguardando Usuário' },
+      { id: 'wait-vendor', label: 'Aguardando Fornecedor' },
+      { id: 'wait-vendor-list', label: 'Cards com Fornecedor' },
+      { id: 'wait-user-list', label: 'Cards com Usuário' },
+    ],
+  },
+  { icon: <Star size={16} strokeWidth={2} />, label: 'Avaliação', items: [] },
+];
+
+/** Side menu of the screen: the tabs, and under the open one the blocks it
+ * holds — clicking a block opens its tab (if needed) and scrolls to it. On a
+ * phone it collapses to just the four tabs (see team-nav.css). */
+function TeamSideNav({
+  tab,
+  activeAnchor,
+  onGo,
+}: {
+  tab: TeamTab;
+  activeAnchor: string | null;
+  onGo: (tab: TeamTab, anchor?: string) => void;
+}) {
   return (
-    <div style={{ display: 'flex', gap: 2, padding: 4, backgroundColor: BrandColors.tableHeader, borderRadius: 10 }}>
-      {tabs.map((t, i) => {
+    <nav className="team-side" aria-label="Seções da Visão do time">
+      {TEAM_NAV.map((t, i) => {
         const selected = tab === i;
         return (
-          <button
-            key={i}
-            onClick={() => setTab(i as 0 | 1 | 2 | 3)}
-            style={{
-              flex: 1,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 8,
-              height: 40,
-              border: 'none',
-              borderRadius: 8,
-              cursor: 'pointer',
-              backgroundColor: selected ? '#fff' : 'transparent',
-              boxShadow: selected ? '0 2px 12px rgba(15,23,42,0.04)' : 'none',
-              color: selected ? BrandColors.primaryDark : '#64748B',
-              fontWeight: selected ? 'bold' : 'normal',
-              fontSize: 13,
-            }}
-          >
-            <span style={{ display: 'flex' }}>{t.icon}</span>
-            {t.label}
-          </button>
+          <div key={t.label} className="team-side-group">
+            <button className={`team-side-tab${selected ? ' active' : ''}`} onClick={() => onGo(i as TeamTab)}>
+              {t.icon}
+              <span>{t.label}</span>
+            </button>
+            {selected && t.items.length > 0 && (
+              <div className="team-side-sub">
+                {t.items.map((item) => (
+                  <button
+                    key={item.id}
+                    className={`team-side-item${activeAnchor === item.id ? ' active' : ''}`}
+                    onClick={() => onGo(i as TeamTab, item.id)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         );
       })}
-    </div>
+    </nav>
   );
 }
 
@@ -2341,158 +2459,6 @@ function TagRaioXDialog({ row, onClose }: { row: TagRankingRow; onClose: () => v
           )}
         </div>
       </div>
-    </Modal>
-  );
-}
-
-function HealthScoreBadge({ score }: { score: number }) {
-  const color = predictabilityColor(score);
-  return (
-    <span style={{ display: 'inline-block', padding: '4px 10px', borderRadius: 999, backgroundColor: hexAlpha(color, 0.12), fontWeight: 'bold', color }}>
-      {score.toFixed(0)}
-    </span>
-  );
-}
-
-function HealthScoreTable({ rows, onSelect }: { rows: HealthScoreRanking[]; onSelect: (row: HealthScoreRanking) => void }) {
-  return (
-    <TableCard isEmpty={rows.length === 0} emptyMessage="Nenhum item concluído nesta sprint.">
-      <table style={tableStyle()}>
-        <thead>
-          <tr>
-            <Th>#</Th>
-            <Th>Responsável</Th>
-            <Th>Rastreabilidade</Th>
-            <Th>Previsibilidade</Th>
-            <Th>Velocidade</Th>
-            <Th>Health Score</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r, i) => (
-            <tr key={r.name} onClick={() => onSelect(r)} style={{ cursor: 'pointer' }}>
-              <Td>{i + 1}</Td>
-              <Td>
-                <ResponsibleTag name={r.name} />
-              </Td>
-              <Td>
-                {r.reliabilityScore.toFixed(0)}%{' '}
-                <span style={{ color: '#94A3B8', fontSize: 11 }}>
-                  ({r.completedItems.length - r.suspiciousItems.length}/{r.completedItems.length})
-                </span>
-              </Td>
-              <Td>
-                {r.predictabilityScore.toFixed(0)}%{' '}
-                <span style={{ color: '#94A3B8', fontSize: 11 }}>
-                  ({r.onTimeItems.length}/{r.completedItems.length})
-                </span>
-              </Td>
-              <Td>
-                {r.speedScore.toFixed(0)}%{' '}
-                <span style={{ color: '#94A3B8', fontSize: 11 }}>
-                  ({r.fastItems.length}/{r.completedItems.length})
-                </span>
-              </Td>
-              <Td>
-                <HealthScoreBadge score={r.score} />
-              </Td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </TableCard>
-  );
-}
-
-function ScoreBadge({ label, tone }: { label: string; tone: 'good' | 'bad' | 'neutral' }) {
-  const color = tone === 'good' ? BrandColors.user : tone === 'bad' ? BrandColors.danger : '#94A3B8';
-  return (
-    <span
-      style={{
-        display: 'inline-block',
-        padding: '2px 8px',
-        borderRadius: 999,
-        fontSize: 11,
-        fontWeight: 600,
-        color,
-        backgroundColor: hexAlpha(color, 0.12),
-        whiteSpace: 'nowrap',
-      }}
-    >
-      {label}
-    </span>
-  );
-}
-
-/** Opens from a Health Score row — one table with every completed item and,
- * per item, exactly which components it counted toward ("conta para isso")
- * and which it didn't ("não por conta disso"), so every percentage in the
- * summary row can be checked against the same list everyone else's is. */
-function HealthScoreDetailDialog({ row, onClose }: { row: HealthScoreRanking; onClose: () => void }) {
-  return (
-    <Modal title={`Health Score — ${row.name}`} width={760} onClose={onClose}>
-      <div style={{ fontSize: 12, color: '#64748B', marginBottom: 4 }}>
-        Os 3 componentes são calculados sobre os mesmos {row.completedItems.length} itens concluídos — cada linha abaixo mostra se contou pra cada um deles.
-      </div>
-      <div style={{ display: 'flex', gap: 16, marginBottom: 12, flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 12.5 }}>
-          <b>Rastreabilidade {row.reliabilityScore.toFixed(0)}%</b> — {row.completedItems.length - row.suspiciousItems.length}/{row.completedItems.length} não suspeitos
-        </span>
-        <span style={{ fontSize: 12.5 }}>
-          <b>Previsibilidade {row.predictabilityScore.toFixed(0)}%</b> — {row.onTimeItems.length}/{row.completedItems.length} no prazo
-        </span>
-        <span style={{ fontSize: 12.5 }}>
-          <b>Velocidade {row.speedScore.toFixed(0)}%</b> — {row.fastItems.length}/{row.completedItems.length} rápidos (Cycle Time ≤ mediana do time{row.teamMedianDays != null && `: ${formatDuration(row.teamMedianDays)}`})
-        </span>
-      </div>
-      {row.completedItems.length === 0 ? (
-        <span style={{ fontSize: 13, color: '#64748B' }}>Nenhum item concluído nesta sprint.</span>
-      ) : (
-        <table style={tableStyle()}>
-          <thead>
-            <tr>
-              <Th>ID</Th>
-              <Th>Título</Th>
-              <Th>Rastreabilidade</Th>
-              <Th>Previsibilidade</Th>
-              <Th>Velocidade</Th>
-            </tr>
-          </thead>
-          <tbody>
-            {row.completedItems.map((m) => {
-              const suspicious = row.suspiciousItems.includes(m);
-              const onTime = row.onTimeItems.includes(m);
-              const late = row.lateItems.includes(m);
-              const fast = row.fastItems.includes(m);
-              return (
-                <tr key={m.item.id}>
-                  <Td>{m.item.id}</Td>
-                  <Td>
-                    <span style={{ display: 'inline-block', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.item.title}</span>
-                  </Td>
-                  <Td>
-                    <ScoreBadge label={suspicious ? 'Suspeito — não conta' : 'Conta'} tone={suspicious ? 'bad' : 'good'} />
-                  </Td>
-                  <Td>
-                    {onTime && <ScoreBadge label="No prazo — conta" tone="good" />}
-                    {late && <ScoreBadge label="Atrasado" tone="bad" />}
-                    {!onTime && !late && <ScoreBadge label="Sem prazo" tone="neutral" />}
-                  </Td>
-                  <Td>
-                    {suspicious ? (
-                      <ScoreBadge label="Suspeito — não conta" tone="bad" />
-                    ) : fast ? (
-                      <ScoreBadge label={`Rápido (${formatDuration(m.inProgressCycleDays)}) — conta`} tone="good" />
-                    ) : (
-                      <ScoreBadge label={`Não rápido (${formatDuration(m.inProgressCycleDays)})`} tone="neutral" />
-                    )}
-                  </Td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      )}
     </Modal>
   );
 }

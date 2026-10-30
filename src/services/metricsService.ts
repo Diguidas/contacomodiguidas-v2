@@ -2,6 +2,10 @@ import { WorkItem, endOfDay } from '../models/workItem';
 
 const MS_PER_HOUR = 1000 * 60 * 60;
 
+/** Smallest Cycle Time (in days) a card needs before it can count as an
+ * outlier in cycleTimeOutliers, whatever the sprint's quartiles say. */
+const OUTLIER_MIN_DAYS = 1;
+
 /** Columns that don't count toward the Dashboard's Cycle Time: everything
  * else is part of the "network" of columns. */
 const CYCLE_TIME_EXCLUDED_COLUMNS = new Set(['Triagem', 'New', 'Backlog', 'Removed', 'Sem retorno do usuário']);
@@ -294,6 +298,65 @@ export class MetricsSummary {
     if (values.length === 0) return 0;
     const index = Math.round((p / 100) * (values.length - 1));
     return values[Math.min(Math.max(index, 0), values.length - 1)];
+  }
+
+  /** Completed items that stretch the average well past the typical card:
+   * above Q3 + 1.5×IQR *and* above 2× the median (the second test keeps a
+   * tight distribution from flagging ordinary items). At most `max`, worst
+   * first (empty when nothing crosses the cutoff). `averageWithout` is the
+   * average once they're set aside, and the quartiles/fences are returned so
+   * the UI can show the arithmetic. Null with fewer than 5 completed items —
+   * there's no "typical" to deviate from. */
+  cycleTimeOutliers(
+    selector: (m: ItemMetric) => number,
+    max = 3,
+  ): {
+    outliers: { metric: ItemMetric; days: number }[];
+    averageWith: number;
+    averageWithout: number;
+    median: number;
+    q1: number;
+    q3: number;
+    iqrFence: number;
+    medianFence: number;
+    fence: number;
+  } | null {
+    const done = this.completed;
+    if (done.length < 5) return null;
+    const values = done.map(selector).sort((a, b) => a - b);
+    const quantile = (p: number) => {
+      const pos = p * (values.length - 1);
+      const lo = Math.floor(pos);
+      const hi = Math.ceil(pos);
+      return values[lo] + (values[hi] - values[lo]) * (pos - lo);
+    };
+    const q1 = quantile(0.25);
+    const q3 = quantile(0.75);
+    const median = quantile(0.5);
+    const iqrFence = q3 + 1.5 * (q3 - q1);
+    const medianFence = 2 * median;
+    // Absolute floor: when the whole sprint is fast, a 0.3d card isn't a
+    // problem just because the typical card took 0.1d.
+    const fence = Math.max(iqrFence, medianFence, OUTLIER_MIN_DAYS);
+    const outliers = done
+      .map((metric) => ({ metric, days: selector(metric) }))
+      .filter((x) => x.days > fence)
+      .sort((a, b) => b.days - a.days)
+      .slice(0, max);
+    const removed = new Set(outliers.map((x) => x.metric));
+    const rest = done.filter((m) => !removed.has(m)).map(selector);
+    const averageWith = values.reduce((a, b) => a + b, 0) / values.length;
+    return {
+      outliers,
+      averageWith,
+      averageWithout: rest.length === 0 ? averageWith : rest.reduce((a, b) => a + b, 0) / rest.length,
+      median,
+      q1,
+      q3,
+      iqrFence,
+      medianFence,
+      fence,
+    };
   }
 
   get averageAgingDays(): number | null {

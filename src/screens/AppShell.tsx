@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Menu, RefreshCw, Home, Users, Contact, LineChart, Clock, Settings, Briefcase, LogOut, Sunrise, ChevronLeft, ChevronRight } from 'lucide-react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { RefreshCw, Home, Users, Contact, LineChart, Clock, Settings, Briefcase, LogOut, Sunrise, AlertTriangle, Ellipsis } from 'lucide-react';
 import { WorkItem } from '../models/workItem';
 import { AzureDevOpsService } from '../services/azureDevOpsService';
 import { AppSettings } from '../services/settingsService';
@@ -12,21 +12,36 @@ import { BrandColors } from '../theme';
 import poletechBadge from '../assets/poletech.png';
 import { DashboardScreen } from './DashboardScreen';
 import { TeamDashboardScreen } from './TeamDashboardScreen';
+import { AttentionScreen } from './AttentionScreen';
 import { DailyScreen } from './DailyScreen';
 import { UsersScreen } from './UsersScreen';
 import { HistoryScreen } from './HistoryScreen';
 import { SlaScreen } from './SlaScreen';
 import { ConfiguracoesScreen } from './ConfiguracoesScreen';
 import { ProjectsScreen } from './ProjectsScreen';
+import '../nav.css';
 
-type Destination = 'dashboard' | 'team' | 'daily' | 'users' | 'history' | 'sla' | 'projects' | 'settings';
+type Destination = 'dashboard' | 'team' | 'attention' | 'daily' | 'users' | 'history' | 'sla' | 'projects' | 'settings';
 
 const configService = new SupabaseConfigService();
 const sprintService = new SprintService();
 const cardRatingService = new CardRatingService();
 
-const DESTINATIONS: Destination[] = ['dashboard', 'team', 'daily', 'users', 'history', 'sla', 'projects', 'settings'];
+const DESTINATIONS: Destination[] = ['dashboard', 'team', 'attention', 'daily', 'users', 'history', 'sla', 'projects', 'settings'];
 const DESTINATION_STORAGE_KEY = 'appShell:destination';
+
+// Top bar tabs (admin only). Configurações isn't here — it lives in the
+// avatar menu, same as "Acesso" in the redespacho dashboard.
+const NAV_ITEMS: { id: Destination; label: string; icon: (size: number) => ReactNode }[] = [
+  { id: 'dashboard', label: 'Dashboard', icon: (s) => <Home size={s} strokeWidth={2} /> },
+  { id: 'team', label: 'Visão do time', icon: (s) => <Users size={s} strokeWidth={2} /> },
+  { id: 'attention', label: 'Atenção', icon: (s) => <AlertTriangle size={s} strokeWidth={2} /> },
+  { id: 'daily', label: 'Daily', icon: (s) => <Sunrise size={s} strokeWidth={2} /> },
+  { id: 'users', label: 'Usuários', icon: (s) => <Contact size={s} strokeWidth={2} /> },
+  { id: 'projects', label: 'Projetos', icon: (s) => <Briefcase size={s} strokeWidth={2} /> },
+  { id: 'history', label: 'Cycle Time & Histórico', icon: (s) => <LineChart size={s} strokeWidth={2} /> },
+  { id: 'sla', label: 'SLA', icon: (s) => <Clock size={s} strokeWidth={2} /> },
+];
 
 // Which tab was open, so it survives the tab getting reloaded (Chrome's
 // Memory Saver discarding a backgrounded tab is the common case) instead of
@@ -72,8 +87,6 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
   // Only picking something older triggers a real (loading) fetch, which
   // also widens the cached window to cover it from then on.
   const [cachedFromSprintNumber, setCachedFromSprintNumber] = useState<number | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   // The main content area is one scrollable div shared by every screen —
   // React doesn't reset its scrollTop just because a different screen (or a
   // different internal tab, e.g. Visão do time's Ranking/WIP/Sofrimento)
@@ -288,96 +301,32 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', backgroundColor: BrandColors.background }}>
-      <header
-        style={{
-          display: 'grid',
-          gridTemplateColumns: '1fr auto 1fr',
-          alignItems: 'center',
-          height: 56,
-          padding: '0 20px',
-          backgroundColor: BrandColors.cardBg,
-          boxShadow: '0 1px 2px rgba(15, 23, 42, 0.06)',
-          position: 'relative',
-          zIndex: 1,
-          flexShrink: 0,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center' }}>
-          {isNarrow && isAdmin && (
-            <button
-              onClick={() => setDrawerOpen(true)}
-              aria-label="menu"
-              style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex' }}
-            >
-              <Menu size={22} strokeWidth={2} />
-            </button>
-          )}
-        </div>
-        <span style={{ fontSize: 20, fontWeight: 800, color: BrandColors.primary, letterSpacing: -0.5 }}>Pole Performance</span>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 12 }}>
+      <header className="nav-topbar">
+        <span className="nav-brand">Pole Performance</span>
+        {isAdmin && (
+          <TopTabs items={NAV_ITEMS} destination={destination} onSelect={selectDestination} />
+        )}
+        <div className="nav-actions">
           <button
+            className="nav-refresh"
             onClick={() => refresh()}
             disabled={loading}
             title="Atualizar itens em aberto + sprint selecionada"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '8px 14px',
-              borderRadius: 8,
-              border: `1px solid ${BrandColors.border}`,
-              backgroundColor: '#fff',
-              cursor: loading ? 'default' : 'pointer',
-              opacity: loading ? 0.6 : 1,
-              fontSize: 13,
-              fontWeight: 600,
-              color: '#334155',
-            }}
           >
             <RefreshCw size={16} strokeWidth={2} />
             {!isNarrow && 'Atualizar'}
           </button>
-          {/* A responsável only ever has the Dashboard tab, so there's nothing
-             to navigate — no sidebar/drawer for them. Their account card and
-             the Pole Tech badge (otherwise only in the sidebar footer) move
-             up here instead, so they're not lost along with the nav. */}
-          {!isAdmin && <UserBadge appUser={appUser} settings={settings} onSignOut={onSignOut} />}
+          <UserMenu
+            appUser={appUser}
+            settings={settings}
+            isAdmin={isAdmin}
+            onOpenSettings={() => selectDestination('settings')}
+            onSignOut={onSignOut}
+          />
         </div>
       </header>
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-        {!isNarrow && isAdmin && (
-          <>
-            <Sidebar
-              settings={settings}
-              appUser={appUser}
-              destination={destination}
-              onSelect={selectDestination}
-              onSignOut={onSignOut}
-              collapsed={sidebarCollapsed}
-              onToggleCollapse={() => setSidebarCollapsed((v) => !v)}
-            />
-          </>
-        )}
-        {isNarrow && isAdmin && drawerOpen && (
-          <div
-            style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.3)', zIndex: 10 }}
-            onClick={() => setDrawerOpen(false)}
-          >
-            <div style={{ height: '100%' }} onClick={(e) => e.stopPropagation()}>
-              <Sidebar
-                settings={settings}
-                appUser={appUser}
-                destination={destination}
-                onSelect={(d) => {
-                  selectDestination(d);
-                  setDrawerOpen(false);
-                }}
-                onSignOut={onSignOut}
-              />
-            </div>
-          </div>
-        )}
-        <div ref={contentRef} style={{ flex: 1, overflow: 'auto', minWidth: 0 }}>
+        <div ref={contentRef} className="nav-content" style={{ flex: 1, overflow: 'auto', minWidth: 0 }}>
           {destination === 'dashboard' && (
             <DashboardScreen
               settings={settings}
@@ -413,6 +362,17 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
               onSprintChanged={onSprintChanged}
               onTabChange={() => contentRef.current?.scrollTo(0, 0)}
               ratingsLoading={ratingsLoading}
+            />
+          )}
+          {destination === 'attention' && isAdmin && (
+            <AttentionScreen
+              settings={settings}
+              items={items}
+              loading={loading}
+              error={error}
+              selectedSprint={selectedSprint}
+              sprints={sprints.current}
+              onSprintChanged={onSprintChanged}
             />
           )}
           {destination === 'daily' && (
@@ -456,6 +416,7 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
           )}
         </div>
       </div>
+      {isAdmin && <BottomNav items={NAV_ITEMS} destination={destination} onSelect={selectDestination} />}
     </div>
   );
 }
@@ -473,445 +434,280 @@ function shortName(name: string): string {
   return `${parts[0]} ${parts[parts.length - 1][0]}. ${parts[parts.length - 1]}`;
 }
 
-/** Compact header-level stand-in for the sidebar's account card, shown to a
- * responsável instead of the full Sidebar (which they'd otherwise see with
- * just a single "Dashboard" item, centered and looking broken). Carries the
- * same info the admin gets in the sidebar: avatar, name, role, sign out, and
- * the Pole Tech badge. */
-function UserBadge({
+type NavItemDef = (typeof NAV_ITEMS)[number];
+
+/** Closes `open` stuff on a click outside `ref` or Escape. */
+function useDismiss(open: boolean, ref: React.RefObject<HTMLElement | null>, close: () => void) {
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close();
+    };
+    document.addEventListener('mousedown', onClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onClick);
+      document.removeEventListener('keydown', onKey);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+}
+
+/** Desktop tabs: as many as fit the available width, the rest behind a
+ * "Mais" dropdown — never a scrollbar. A hidden copy of every tab (plus the
+ * "Mais" button) is measured so the count is exact, and re-measured whenever
+ * the bar or the fonts resize it. */
+function TopTabs({
+  items,
+  destination,
+  onSelect,
+}: {
+  items: NavItemDef[];
+  destination: Destination;
+  onSelect: (d: Destination) => void;
+}) {
+  const navRef = useRef<HTMLElement>(null);
+  const measureRef = useRef<HTMLDivElement>(null);
+  const moreRef = useRef<HTMLDivElement>(null);
+  const [visibleCount, setVisibleCount] = useState(items.length);
+  const [moreOpen, setMoreOpen] = useState(false);
+  useDismiss(moreOpen, moreRef, () => setMoreOpen(false));
+
+  useLayoutEffect(() => {
+    const nav = navRef.current;
+    const measure = measureRef.current;
+    if (nav == null || measure == null) return;
+    const GAP = 4;
+    function recompute() {
+      const kids = Array.from(measure!.children) as HTMLElement[];
+      const moreWidth = kids[kids.length - 1].offsetWidth;
+      const widths = kids.slice(0, -1).map((k) => k.offsetWidth);
+      const available = nav!.clientWidth;
+      const total = widths.reduce((s, w) => s + w, 0) + GAP * (widths.length - 1);
+      if (total <= available) {
+        setVisibleCount(widths.length);
+        return;
+      }
+      let used = moreWidth;
+      let count = 0;
+      for (const w of widths) {
+        if (used + GAP + w > available) break;
+        used += GAP + w;
+        count++;
+      }
+      setVisibleCount(count);
+    }
+    recompute();
+    const observer = new ResizeObserver(recompute);
+    observer.observe(nav);
+    observer.observe(measure);
+    return () => observer.disconnect();
+  }, [items]);
+
+  const shown = items.slice(0, visibleCount);
+  const hidden = items.slice(visibleCount);
+  const hiddenActive = hidden.some((n) => n.id === destination);
+
+  return (
+    <nav className="nav-tabs" aria-label="Principal" ref={navRef}>
+      {shown.map((n) => (
+        <button key={n.id} className={`nav-tab${destination === n.id ? ' active' : ''}`} onClick={() => onSelect(n.id)}>
+          {n.icon(16)}
+          {n.label}
+        </button>
+      ))}
+      {hidden.length > 0 && (
+        <div className="nav-more" ref={moreRef}>
+          <button
+            className={`nav-tab${hiddenActive ? ' active' : ''}`}
+            onClick={() => setMoreOpen((v) => !v)}
+            aria-haspopup="menu"
+            aria-expanded={moreOpen}
+          >
+            <Ellipsis size={16} strokeWidth={2} />
+            Mais
+          </button>
+          {moreOpen && (
+            <div className="nav-more-panel" role="menu">
+              {hidden.map((n) => (
+                <button
+                  key={n.id}
+                  className={`nav-user-item${destination === n.id ? ' active' : ''}`}
+                  role="menuitem"
+                  onClick={() => {
+                    setMoreOpen(false);
+                    onSelect(n.id);
+                  }}
+                >
+                  {n.icon(15)}
+                  {n.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      <div className="nav-tabs-measure" ref={measureRef} aria-hidden>
+        {items.map((n) => (
+          <button key={n.id} className="nav-tab active" tabIndex={-1}>
+            {n.icon(16)}
+            {n.label}
+          </button>
+        ))}
+        <button className="nav-tab active" tabIndex={-1}>
+          <Ellipsis size={16} strokeWidth={2} />
+          Mais
+        </button>
+      </div>
+    </nav>
+  );
+}
+
+const BOTTOM_VISIBLE = 3;
+
+/** Phone navigation: the first three screens plus "Mais", which slides up a
+ * small sheet with the rest to pick from. */
+function BottomNav({
+  items,
+  destination,
+  onSelect,
+}: {
+  items: NavItemDef[];
+  destination: Destination;
+  onSelect: (d: Destination) => void;
+}) {
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const shown = items.slice(0, BOTTOM_VISIBLE);
+  const rest = items.slice(BOTTOM_VISIBLE);
+  const restActive = rest.some((n) => n.id === destination);
+
+  useEffect(() => {
+    if (!sheetOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSheetOpen(false);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [sheetOpen]);
+
+  return (
+    <>
+      <nav className="nav-bottom" aria-label="Principal">
+        {shown.map((n) => (
+          <button
+            key={n.id}
+            className={`nav-bottom-tab${destination === n.id ? ' active' : ''}`}
+            onClick={() => onSelect(n.id)}
+          >
+            {n.icon(22)}
+            <span>{n.label}</span>
+          </button>
+        ))}
+        <button
+          className={`nav-bottom-tab${restActive || sheetOpen ? ' active' : ''}`}
+          onClick={() => setSheetOpen(true)}
+          aria-haspopup="dialog"
+        >
+          <Ellipsis size={22} strokeWidth={2} />
+          <span>Mais</span>
+        </button>
+      </nav>
+      {sheetOpen && (
+        <div className="nav-sheet-backdrop" onClick={() => setSheetOpen(false)}>
+          <div className="nav-sheet" role="dialog" aria-label="Mais telas" onClick={(e) => e.stopPropagation()}>
+            <div className="nav-sheet-handle" />
+            {rest.map((n) => (
+              <button
+                key={n.id}
+                className={`nav-sheet-item${destination === n.id ? ' active' : ''}`}
+                onClick={() => {
+                  setSheetOpen(false);
+                  onSelect(n.id);
+                }}
+              >
+                {n.icon(20)}
+                {n.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Avatar button at the right of the top bar. Opens a small panel with who is
+ * signed in, Configurações (admin only), Sair and the Pole Tech badge — what
+ * used to live in the sidebar footer (and in the responsável's header badge). */
+function UserMenu({
   appUser,
   settings,
+  isAdmin,
+  onOpenSettings,
   onSignOut,
 }: {
   appUser: AppUser;
   settings: AppSettings;
+  isAdmin: boolean;
+  onOpenSettings: () => void;
   onSignOut: () => void;
 }) {
   const displayName = appUser.responsavelName ?? settings.myDisplayName;
   const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useDismiss(open, ref, () => setOpen(false));
+
   return (
-    <div style={{ position: 'relative' }}>
+    <div className="nav-user" ref={ref}>
       <button
+        className="nav-avatar"
         onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
         title={displayName}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: '4px 10px 4px 4px',
-          borderRadius: 999,
-          border: `1px solid ${BrandColors.border}`,
-          backgroundColor: '#fff',
-          cursor: 'pointer',
-        }}
       >
-        <div
-          style={{
-            width: 28,
-            height: 28,
-            borderRadius: '50%',
-            backgroundColor: BrandColors.primaryLightBg,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontWeight: 700,
-            color: BrandColors.primaryDark,
-            fontSize: 11.5,
-            flexShrink: 0,
-          }}
-        >
-          {initials(displayName)}
-        </div>
-        <span style={{ fontSize: 13, fontWeight: 600, color: '#334155' }}>{shortName(displayName)}</span>
+        {initials(displayName)}
       </button>
       {open && (
-        <>
-          <div style={{ position: 'fixed', inset: 0, zIndex: 19 }} onClick={() => setOpen(false)} />
-          <div
-            style={{
-              position: 'absolute',
-              right: 0,
-              top: '100%',
-              marginTop: 8,
-              width: 200,
-              backgroundColor: '#FFFFFF',
-              borderRadius: 12,
-              border: `1px solid ${BrandColors.border}`,
-              boxShadow: '0 4px 16px rgba(15, 23, 42, 0.12)',
-              zIndex: 20,
-              overflow: 'hidden',
-            }}
-          >
-            <div style={{ padding: '10px 14px', borderBottom: `1px solid ${BrandColors.border}` }}>
-              <div
-                style={{ fontWeight: 600, fontSize: 13, color: '#1E293B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                title={appUser.email}
-              >
-                {shortName(displayName)}
-              </div>
-              <div style={{ fontSize: 11, color: '#94A3B8', fontWeight: 500 }}>Responsável</div>
-            </div>
+        <div className="nav-user-panel" role="menu">
+          <div className="nav-user-header" title={appUser.email}>
+            <span className="nav-user-name">{shortName(displayName)}</span>
+            <span className="nav-user-role">{isAdmin ? 'Administrador' : 'Responsável'}</span>
+          </div>
+          {isAdmin && (
             <button
+              className="nav-user-item"
+              role="menuitem"
               onClick={() => {
                 setOpen(false);
-                onSignOut();
-              }}
-              style={{
-                width: '100%',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '10px 14px',
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                color: BrandColors.danger,
-                fontSize: 13,
-                fontWeight: 600,
-                textAlign: 'left',
+                onOpenSettings();
               }}
             >
-              <LogOut size={14} strokeWidth={2} />
-              Sair
+              <Settings size={15} />
+              Configurações
             </button>
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 6,
-                padding: '8px 14px',
-                borderTop: `1px solid ${BrandColors.border}`,
-                backgroundColor: '#FAFBFC',
-              }}
-            >
-              <span style={{ fontSize: 10, color: '#B0B9C6', letterSpacing: 0.3 }}>desenvolvido por</span>
-              <img src={poletechBadge} alt="Pole Tech" style={{ height: 16, objectFit: 'contain', opacity: 0.85 }} />
-            </div>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-function Sidebar({
-  settings,
-  appUser,
-  destination,
-  onSelect,
-  onSignOut,
-  collapsed = false,
-  onToggleCollapse,
-}: {
-  settings: AppSettings;
-  appUser: AppUser;
-  destination: Destination;
-  onSelect: (d: Destination) => void;
-  onSignOut: () => void;
-  collapsed?: boolean;
-  onToggleCollapse?: () => void;
-}) {
-  const isAdmin = appUser.role === 'admin';
-  // A responsável logged in sees who they're browsing as; an admin still
-  // reads by the shared "tag owner" name (settings.myDisplayName) here,
-  // same as before — that name isn't tied to whoever's logged in.
-  const displayName = appUser.responsavelName ?? settings.myDisplayName;
-  // Collapsed: the name/role text and inline "Sair" button have no room, so
-  // they move into a small popover that opens off the avatar instead.
-  const [showUserMenu, setShowUserMenu] = useState(false);
-  return (
-    <div
-      style={{
-        width: collapsed ? 72 : 240,
-        backgroundColor: '#FFFFFF',
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        boxShadow: '1px 0 2px rgba(15, 23, 42, 0.05)',
-        position: 'relative',
-        zIndex: 1,
-        transition: 'width 0.15s ease',
-        flexShrink: 0,
-      }}
-    >
-      {onToggleCollapse && (
-        <div style={{ display: 'flex', justifyContent: collapsed ? 'center' : 'flex-end', padding: '10px 12px 0' }}>
+          )}
           <button
-            onClick={onToggleCollapse}
-            title={collapsed ? 'Expandir menu' : 'Recolher menu'}
-            aria-label={collapsed ? 'Expandir menu' : 'Recolher menu'}
-            style={{
-              background: 'none',
-              border: `1px solid ${BrandColors.border}`,
-              borderRadius: 8,
-              padding: 6,
-              cursor: 'pointer',
-              color: '#64748B',
-              display: 'flex',
-              alignItems: 'center',
+            className="nav-user-item danger"
+            role="menuitem"
+            onClick={() => {
+              setOpen(false);
+              onSignOut();
             }}
           >
-            {collapsed ? <ChevronRight size={14} strokeWidth={2} /> : <ChevronLeft size={14} strokeWidth={2} />}
+            <LogOut size={15} />
+            Sair
           </button>
-        </div>
-      )}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'flex-start', paddingTop: 12 }}>
-        <NavItem icon={<Home size={16} strokeWidth={2} />} label="Dashboard" selected={destination === 'dashboard'} onClick={() => onSelect('dashboard')} collapsed={collapsed} />
-        {isAdmin && (
-          <>
-            <NavItem icon={<Users size={16} strokeWidth={2} />} label="Visão do time" selected={destination === 'team'} onClick={() => onSelect('team')} collapsed={collapsed} />
-            <NavItem icon={<Sunrise size={16} strokeWidth={2} />} label="Daily" selected={destination === 'daily'} onClick={() => onSelect('daily')} collapsed={collapsed} />
-            <NavItem icon={<Contact size={16} strokeWidth={2} />} label="Usuários" selected={destination === 'users'} onClick={() => onSelect('users')} collapsed={collapsed} />
-            <NavItem icon={<Briefcase size={16} strokeWidth={2} />} label="Projetos" selected={destination === 'projects'} onClick={() => onSelect('projects')} collapsed={collapsed} />
-            <NavItem icon={<LineChart size={16} strokeWidth={2} />} label="Cycle Time & Histórico" selected={destination === 'history'} onClick={() => onSelect('history')} collapsed={collapsed} />
-            <NavItem icon={<Clock size={16} strokeWidth={2} />} label="SLA" selected={destination === 'sla'} onClick={() => onSelect('sla')} collapsed={collapsed} />
-            <NavItem icon={<Settings size={16} strokeWidth={2} />} label="Configurações" selected={destination === 'settings'} onClick={() => onSelect('settings')} collapsed={collapsed} />
-          </>
-        )}
-      </div>
-      <div style={{ padding: '0 12px 12px', position: 'relative' }}>
-        {collapsed ? (
-          <button
-            onClick={() => setShowUserMenu((v) => !v)}
-            title={displayName}
-            aria-label={`Conta de ${displayName}`}
-            style={{
-              width: '100%',
-              display: 'flex',
-              justifyContent: 'center',
-              background: 'none',
-              border: 'none',
-              padding: 0,
-              cursor: 'pointer',
-            }}
-          >
-            <div
-              style={{
-                width: 34,
-                height: 34,
-                borderRadius: '50%',
-                backgroundColor: BrandColors.primaryLightBg,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontWeight: 700,
-                color: BrandColors.primaryDark,
-                fontSize: 12.5,
-                flexShrink: 0,
-              }}
-            >
-              {initials(displayName)}
-            </div>
-          </button>
-        ) : (
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              padding: '10px 12px',
-              borderRadius: 12,
-              backgroundColor: '#F8FAFC',
-              border: `1px solid ${BrandColors.border}`,
-            }}
-          >
-            <div
-              style={{
-                width: 34,
-                height: 34,
-                borderRadius: '50%',
-                backgroundColor: BrandColors.primaryLightBg,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontWeight: 700,
-                color: BrandColors.primaryDark,
-                fontSize: 12.5,
-                flexShrink: 0,
-              }}
-            >
-              {initials(displayName)}
-            </div>
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div
-                style={{
-                  fontWeight: 600,
-                  fontSize: 13,
-                  color: '#1E293B',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-                title={appUser.email}
-              >
-                {shortName(displayName)}
-              </div>
-              <div style={{ fontSize: 11, color: '#94A3B8', fontWeight: 500 }}>
-                {isAdmin ? 'Administrador' : 'Responsável'}
-              </div>
-            </div>
-            <button
-              onClick={onSignOut}
-              title="Sair"
-              aria-label="Sair"
-              style={{
-                background: 'none',
-                border: 'none',
-                padding: 6,
-                borderRadius: 8,
-                cursor: 'pointer',
-                color: '#94A3B8',
-                display: 'flex',
-                alignItems: 'center',
-                flexShrink: 0,
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.backgroundColor = '#EEF2F6';
-                e.currentTarget.style.color = BrandColors.danger;
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.backgroundColor = 'transparent';
-                e.currentTarget.style.color = '#94A3B8';
-              }}
-            >
-              <LogOut size={15} strokeWidth={2} />
-            </button>
+          <div className="nav-made-by">
+            <span>desenvolvido por</span>
+            <img src={poletechBadge} alt="Pole Tech" />
           </div>
-        )}
-        {collapsed && showUserMenu && (
-          <>
-            <div style={{ position: 'fixed', inset: 0, zIndex: 19 }} onClick={() => setShowUserMenu(false)} />
-            <div
-              style={{
-                position: 'absolute',
-                left: '100%',
-                bottom: 0,
-                marginLeft: 8,
-                width: 200,
-                backgroundColor: '#FFFFFF',
-                borderRadius: 12,
-                border: `1px solid ${BrandColors.border}`,
-                boxShadow: '0 4px 16px rgba(15, 23, 42, 0.12)',
-                zIndex: 20,
-                overflow: 'hidden',
-              }}
-            >
-              <div style={{ padding: '10px 14px', borderBottom: `1px solid ${BrandColors.border}` }}>
-                <div
-                  style={{ fontWeight: 600, fontSize: 13, color: '#1E293B', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                  title={appUser.email}
-                >
-                  {shortName(displayName)}
-                </div>
-                <div style={{ fontSize: 11, color: '#94A3B8', fontWeight: 500 }}>{isAdmin ? 'Administrador' : 'Responsável'}</div>
-              </div>
-              <button
-                onClick={() => {
-                  setShowUserMenu(false);
-                  onSignOut();
-                }}
-                style={{
-                  width: '100%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '10px 14px',
-                  background: 'none',
-                  border: 'none',
-                  cursor: 'pointer',
-                  color: BrandColors.danger,
-                  fontSize: 13,
-                  fontWeight: 600,
-                  textAlign: 'left',
-                }}
-              >
-                <LogOut size={14} strokeWidth={2} />
-                Sair
-              </button>
-            </div>
-          </>
-        )}
-      </div>
-      {!collapsed && (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 6,
-            padding: '10px 16px',
-            borderTop: `1px solid ${BrandColors.border}`,
-            backgroundColor: '#FAFBFC',
-          }}
-        >
-          <span style={{ fontSize: 10, color: '#B0B9C6', letterSpacing: 0.3 }}>desenvolvido por</span>
-          <img src={poletechBadge} alt="Pole Tech" style={{ height: 18, objectFit: 'contain', opacity: 0.85 }} />
         </div>
       )}
     </div>
   );
 }
-
-function NavItem({
-  icon,
-  label,
-  selected,
-  onClick,
-  collapsed = false,
-}: {
-  icon: ReactNode;
-  label: string;
-  selected: boolean;
-  onClick: () => void;
-  collapsed?: boolean;
-}) {
-  return (
-    <div style={{ padding: collapsed ? '4px 8px' : '4px 12px' }}>
-      <button
-        onClick={onClick}
-        title={collapsed ? label : undefined}
-        style={{
-          width: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: collapsed ? 'center' : 'flex-start',
-          gap: 12,
-          padding: '12px',
-          borderRadius: 10,
-          border: 'none',
-          cursor: 'pointer',
-          backgroundColor: selected ? BrandColors.primary : 'transparent',
-          textAlign: 'left',
-        }}
-      >
-        <span
-          style={{
-            width: 20,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: selected ? '#FFFFFF' : '#334155',
-            flexShrink: 0,
-          }}
-        >
-          {icon}
-        </span>
-        {!collapsed && (
-          <span
-            style={{
-              fontWeight: selected ? 700 : 400,
-              color: selected ? '#FFFFFF' : '#334155',
-              fontSize: 14,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {label}
-          </span>
-        )}
-      </button>
-    </div>
-  );
-}
+

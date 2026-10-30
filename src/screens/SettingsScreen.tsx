@@ -126,7 +126,7 @@ export function SettingsScreen({
           <SectionTitle text="Dono da tag de mesclagem" />
           <p style={{ margin: '0 0 4px', fontSize: 12, color: '#64748B' }}>
             Não é "quem está logado" — é a pessoa cuja regra "meus itens + marcados com a tag" (usada no Dashboard, Ranking de
-            performance, Health Score, Cycle Time por responsável e WIP) está configurada pra todo o app.
+            performance, Cycle Time por responsável e WIP) está configurada pra todo o app.
           </p>
           <Field
             label="Nome de exibição no Azure DevOps"

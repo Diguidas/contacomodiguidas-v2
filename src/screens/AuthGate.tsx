@@ -19,7 +19,13 @@ export function AuthGate() {
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
     const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
-      setSession(newSession);
+      // supabase-js re-emits the session whenever the browser tab regains
+      // focus (and on every token refresh). Same user = nothing changed:
+      // keeping the previous object stops the effect below from resetting
+      // `appUser`, which would flash the splash and remount the whole app.
+      setSession((prev) =>
+        prev != null && newSession != null && prev.user.id === newSession.user.id ? prev : newSession,
+      );
     });
     return () => listener.subscription.unsubscribe();
   }, []);

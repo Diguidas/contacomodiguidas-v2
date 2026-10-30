@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   Bar,
@@ -23,6 +23,7 @@ import { AppSettings } from '../services/settingsService';
 import { Sprint, SprintService } from '../services/sprintService';
 import { overdueForSprint, sprintCutoff } from '../services/sprintSnapshotService';
 import { BrandColors } from '../theme';
+import '../team-nav.css';
 import {
   AlertTriangle,
   ArrowLeftRight,
@@ -137,6 +138,12 @@ export function DashboardScreen({
   lockedResponsible?: string;
 }) {
   const completedSectionRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [activeNav, setActiveNav] = useState<string | null>(null);
+  const ready = !loading && error == null;
+  useEffect(() => {
+    if (ready) bodyRef.current?.scrollTo(0, dashScroll);
+  }, [ready]);
 
   // "Active" filters — what's actually applied to the data right now. The
   // "Responsável" dropdown is just a name: picking settings.myDisplayName
@@ -373,38 +380,10 @@ export function DashboardScreen({
       </div>
     );
   }
-  if (loading) {
-    return (
-      <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
-        <div style={{ textAlign: 'center' }}>
-          <div style={{ display: 'flex', justifyContent: 'center' }}>
-            <Clock size={28} strokeWidth={1.75} color="#64748B" />
-          </div>
-          <div style={{ height: 12 }} />
-          <p style={{ fontSize: 13 }}>Buscando seus cards no Azure Boards...</p>
-        </div>
-      </div>
-    );
-  }
-  if (error != null) {
-    return (
-      <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
-        <div style={{ textAlign: 'center', maxWidth: 480 }}>
-          <div style={{ display: 'flex', justifyContent: 'center', color: BrandColors.danger }}>
-            <AlertTriangle size={40} strokeWidth={1.75} />
-          </div>
-          <p>{error}</p>
-          <button onClick={onRefresh} style={primaryButtonStyle}>
-            Tentar novamente
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  const summary = sprintFilteredSummary();
+  const summary = ready ? sprintFilteredSummary() : null;
   const aging = agingItems;
   const triage = triageItems;
+  const isDev = selectedSpecificPerson?.trim().toLowerCase() === settings.myDisplayName.trim().toLowerCase();
 
   // "Atrasados da sprint": cards whose original deadline fell in the
   // selected sprint and that missed it — concluded late, or still open with
@@ -419,27 +398,69 @@ export function DashboardScreen({
           stillOpen: groupSummary.inProgress.filter((m) => !m.item.isCancelled && m.item.isLate(new Date()) === true),
         };
 
-  return (
-    <div style={{ padding: 16, display: 'flex', justifyContent: 'center' }}>
-      <div style={{ maxWidth: 1500, width: '100%' }}>
-        <Filters
-          settings={settings}
-          sprints={sprints}
-          pendingSpecificPerson={pendingSpecificPerson}
-          setPendingSpecificPerson={setPendingSpecificPerson}
-          knownResponsibles={knownResponsibles}
-          lockedResponsible={lockedResponsible}
-          pendingType={pendingType}
-          setPendingType={setPendingType}
-          pendingArea={pendingArea}
-          setPendingArea={setPendingArea}
-          knownAreas={knownAreas}
-          areaLeaf={areaLeaf}
-          pendingSprint={pendingSprint}
-          setPendingSprint={setPendingSprint}
-          onSearch={applyPendingFilters}
-        />
-        <div style={{ height: 20 }} />
+  // Side menu: one entry per block of the page. Rework / tag queue only exist
+  // for the developer (same rule as the blocks themselves), so they only
+  // show up here when they actually render.
+  const hasCompleted = summary != null && summary.completed.length > 0;
+  const navItems: DashNavItem[] = [
+    {
+      id: 'summary',
+      label: 'Resumo',
+      icon: <LayoutList size={16} strokeWidth={2} />,
+      children: [
+        { id: 'cycle', label: 'Cycle Time' },
+        { id: 'delivery', label: 'Entrega' },
+        { id: 'quality', label: 'Qualidade & prazo' },
+      ],
+    },
+    { id: 'columns', label: 'Tempo médio por coluna', icon: <Clock size={16} strokeWidth={2} /> },
+    ...(isDev && hasCompleted ? [{ id: 'rework', label: 'Retrabalho em Dev', icon: <ArrowLeftRight size={16} strokeWidth={2} /> }] : []),
+    ...(isDev ? [{ id: 'queue', label: `Fila com a tag "${settings.tagFilter}"`, icon: <PauseCircle size={16} strokeWidth={2} /> }] : []),
+    { id: 'charts', label: 'Gráficos de tempo', icon: <Zap size={16} strokeWidth={2} /> },
+    { id: 'breakdown', label: 'Cruzamento por agrupamento', icon: <Building2 size={16} strokeWidth={2} /> },
+    { id: 'aging', label: 'Itens em aberto', icon: <Calendar size={16} strokeWidth={2} /> },
+    { id: 'triage', label: 'Em Triagem', icon: <TagIcon size={16} strokeWidth={2} /> },
+    ...(hasCompleted ? [{ id: 'completed', label: 'Itens concluídos', icon: <CheckCircle2 size={16} strokeWidth={2} /> }] : []),
+  ];
+
+  function goToSection(id: string) {
+    setActiveNav(id);
+    document.getElementById(`dash-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  // The side menu (filters + sections) stays put while the page loads or
+  // fails — only this content swaps, so nothing flashes away and back.
+  let body: ReactNode;
+  if (loading) {
+    body = (
+      <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ display: 'flex', justifyContent: 'center' }}>
+            <Clock size={28} strokeWidth={1.75} color="#64748B" />
+          </div>
+          <div style={{ height: 12 }} />
+          <p style={{ fontSize: 13 }}>Buscando seus cards no Azure Boards...</p>
+        </div>
+      </div>
+    );
+  } else if (error != null || summary == null) {
+    body = (
+      <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
+        <div style={{ textAlign: 'center', maxWidth: 480 }}>
+          <div style={{ display: 'flex', justifyContent: 'center', color: BrandColors.danger }}>
+            <AlertTriangle size={40} strokeWidth={1.75} />
+          </div>
+          <p>{error}</p>
+          <button onClick={onRefresh} style={primaryButtonStyle}>
+            Tentar novamente
+          </button>
+        </div>
+      </div>
+    );
+  } else {
+    body = (
+      <>
+        <Anchor id="summary" />
         <DetectedColumnsWarning settings={settings} detected={detectedBoardColumns} />
         <SummaryCards
           summary={summary}
@@ -448,14 +469,18 @@ export function DashboardScreen({
           hasSprint={selectedSprint != null}
           cycleOf={cycleOf}
           onOpenOverdue={() => setOverdueOpen(true)}
+          onSelectItem={setDetailItem}
         />
         <div style={{ height: 20 }} />
+        <Anchor id="columns" />
         <ColumnAverageCard summary={last30DaysSummary()} personName={selectedSpecificPerson ?? 'responsável'} />
         <div style={{ height: 20 }} />
         <ReworkSection summary={summary} settings={settings} selectedSpecificPerson={selectedSpecificPerson} onSelectItem={setDetailItem} />
         <TaggedQueueSection selectedSpecificPerson={selectedSpecificPerson} settings={settings} groupSummary={groupSummary} selectedSprint={selectedSprint} />
+        <Anchor id="charts" />
         <ChartsRow summary={summary} onSeeDetails={() => completedSectionRef.current?.scrollIntoView({ behavior: 'smooth' })} />
         <div style={{ height: 20 }} />
+        <Anchor id="breakdown" />
         <BreakdownSection
           summary={summary}
           cycleOf={cycleOf}
@@ -463,6 +488,7 @@ export function DashboardScreen({
           setSelectedBreakdown={setSelectedBreakdown}
         />
         <div style={{ height: 20 }} />
+        <Anchor id="aging" />
         <AgingSection
           aging={aging}
           applySort={applySort}
@@ -472,8 +498,10 @@ export function DashboardScreen({
           onSelectItem={setDetailItem}
         />
         <div style={{ height: 20 }} />
+        <Anchor id="triage" />
         <TriageSection triage={triage} applySort={applySort} expanded={triageExpanded} setExpanded={setTriageExpanded} onSelectItem={setDetailItem} />
         <div style={{ height: 20 }} />
+        <Anchor id="completed" />
         <CompletedTable
           ref={completedSectionRef}
           summary={summary}
@@ -483,6 +511,45 @@ export function DashboardScreen({
         />
         <div style={{ height: 16 }} />
         <Footer lastUpdated={lastUpdated} onRefresh={onRefresh} />
+      </>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div className="team-layout dash">
+        <aside className="team-side" aria-label="Seções do Dashboard">
+          <DashSideNav items={navItems} activeId={activeNav} onGo={goToSection} />
+        </aside>
+        <div
+          ref={bodyRef}
+          className="team-body"
+          onScroll={(e) => {
+            dashScroll = e.currentTarget.scrollTop;
+          }}
+        >
+          <div style={{ maxWidth: 1500, margin: '0 auto' }}>
+            <Filters
+              settings={settings}
+              sprints={sprints}
+              pendingSpecificPerson={pendingSpecificPerson}
+              setPendingSpecificPerson={setPendingSpecificPerson}
+              knownResponsibles={knownResponsibles}
+              lockedResponsible={lockedResponsible}
+              pendingType={pendingType}
+              setPendingType={setPendingType}
+              pendingArea={pendingArea}
+              setPendingArea={setPendingArea}
+              knownAreas={knownAreas}
+              areaLeaf={areaLeaf}
+              pendingSprint={pendingSprint}
+              setPendingSprint={setPendingSprint}
+              onSearch={applyPendingFilters}
+            />
+            <div style={{ height: 20 }} />
+            {body}
+          </div>
+        </div>
       </div>
       {overdueOpen && (
         <OverdueDialog
@@ -503,6 +570,64 @@ export function DashboardScreen({
         />
       )}
     </div>
+  );
+}
+
+// Scroll position of the page body, kept while the app stays open so leaving
+// the Dashboard (it unmounts) and coming back lands where you were.
+let dashScroll = 0;
+
+interface DashNavItem {
+  id: string;
+  label: string;
+  icon: ReactNode;
+  children?: { id: string; label: string }[];
+}
+
+/** Invisible marker the side menu scrolls to. */
+function Anchor({ id }: { id: string }) {
+  return <div id={`dash-${id}`} />;
+}
+
+/** Sections list under the filters — clicking one scrolls straight to it. On
+ * a phone it's hidden (see team-nav.css) and only the filters remain. */
+function DashSideNav({
+  items,
+  activeId,
+  onGo,
+}: {
+  items: DashNavItem[];
+  activeId: string | null;
+  onGo: (id: string) => void;
+}) {
+  return (
+    <nav className="dash-nav" aria-label="Seções do Dashboard">
+      <div className="dash-nav-title">SEÇÕES</div>
+      {items.map((it) => {
+        const active = activeId === it.id || (it.children?.some((c) => c.id === activeId) ?? false);
+        return (
+          <div key={it.id} className="team-side-group">
+            <button className={`team-side-tab${active ? ' active' : ''}`} onClick={() => onGo(it.id)}>
+              {it.icon}
+              <span>{it.label}</span>
+            </button>
+            {it.children && (
+              <div className="team-side-sub">
+                {it.children.map((c) => (
+                  <button
+                    key={c.id}
+                    className={`team-side-item${activeId === c.id ? ' active' : ''}`}
+                    onClick={() => onGo(c.id)}
+                  >
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </nav>
   );
 }
 
@@ -555,7 +680,7 @@ function selectStyle(): React.CSSProperties {
   };
 }
 
-function FieldWrap({ label, width, children }: { label: string; width: number; children: ReactNode }) {
+function FieldWrap({ label, width, children }: { label: string; width: number | string; children: ReactNode }) {
   return (
     <label style={{ display: 'flex', flexDirection: 'column', gap: 4, width }}>
       <span style={{ fontSize: 11.5, fontWeight: 600, color: '#334155' }}>{label}</span>
@@ -663,7 +788,10 @@ function Filters({
             ))}
           </select>
         </FieldWrap>
-        <button onClick={onSearch} style={{ ...primaryButtonStyle, marginTop: 0, height: 42, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <button
+          onClick={onSearch}
+          style={{ ...primaryButtonStyle, marginTop: 0, height: 42, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
+        >
           <Search size={16} strokeWidth={2} /> Pesquisar
         </button>
       </div>
@@ -744,9 +872,9 @@ function StatCard({ title, subtitle, value, icon, color }: { title: string; subt
 /** A labeled cluster of StatCards — splits the old wall of 15 identical
  * tiles into named groups (Cycle Time / Volume / Qualidade) so the eye has
  * somewhere to land instead of scanning a flat grid. */
-function StatGroup({ label, cards, header }: { label: string; cards: ReactNode[]; header?: ReactNode }) {
+function StatGroup({ label, cards, header, anchor }: { label: string; cards: ReactNode[]; header?: ReactNode; anchor?: string }) {
   return (
-    <div>
+    <div id={anchor ? `dash-${anchor}` : undefined}>
       <div style={{ display: 'flex', alignItems: 'center' }}>
         <span style={{ fontSize: 11, fontWeight: 'bold', letterSpacing: 0.6, color: '#94A3B8' }}>
           {label.toUpperCase()}
@@ -771,6 +899,7 @@ function SummaryCards({
   hasSprint,
   cycleOf,
   onOpenOverdue,
+  onSelectItem,
 }: {
   summary: MetricsSummary;
   aging: ItemMetric[];
@@ -778,8 +907,10 @@ function SummaryCards({
   hasSprint: boolean;
   cycleOf: (m: ItemMetric) => number;
   onOpenOverdue: () => void;
+  onSelectItem: (m: ItemMetric) => void;
 }) {
   const avgCycleTime = summary.averageMetricDays(cycleOf);
+  const outlierInfo = summary.cycleTimeOutliers(cycleOf);
 
   const cycleTimeCards = [
     <StatCard
@@ -790,6 +921,37 @@ function SummaryCards({
       icon={<Clock size={18} strokeWidth={1.75} />}
       color={BrandColors.primary}
     />,
+    ...(outlierInfo && outlierInfo.outliers.length > 0
+      ? [
+          <div key="outliers" style={{ ...cardStyle(), width: 432 }}>
+            <div style={{ fontSize: 12, color: '#64748B' }}>Cycle Time sem os maiores ofensores</div>
+            <div style={{ height: 4 }} />
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+              <span style={{ fontSize: 20, fontWeight: 'bold', color: BrandColors.user }}>
+                {outlierInfo.averageWithout.toFixed(1)} dias
+              </span>
+              <span style={{ fontSize: 11, color: '#94A3B8' }}>
+                era {outlierInfo.averageWith.toFixed(1)} · −{(outlierInfo.averageWith - outlierInfo.averageWithout).toFixed(1)}
+              </span>
+            </div>
+            <div style={{ height: 8 }} />
+            {outlierInfo.outliers.map(({ metric, days }) => (
+              <div
+                key={metric.item.id}
+                onClick={() => onSelectItem(metric)}
+                title="Ver detalhes do card"
+                style={{ display: 'flex', gap: 8, fontSize: 12, padding: '3px 0', cursor: 'pointer' }}
+              >
+                <span style={{ color: '#64748B' }}>#{metric.item.id}</span>
+                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {metric.item.title}
+                </span>
+                <span style={{ fontWeight: 600, color: BrandColors.danger }}>{days.toFixed(1)}d</span>
+              </div>
+            ))}
+          </div>,
+        ]
+      : []),
   ];
 
   const volumeCards = [
@@ -861,9 +1023,10 @@ function SummaryCards({
       <StatGroup
         label="Cycle Time"
         cards={cycleTimeCards}
+        anchor="cycle"
       />
-      <StatGroup label="Entrega" cards={volumeCards} />
-      <StatGroup label="Qualidade & prazo" cards={qualityCards} />
+      <StatGroup label="Entrega" cards={volumeCards} anchor="delivery" />
+      <StatGroup label="Qualidade & prazo" cards={qualityCards} anchor="quality" />
     </div>
   );
 }
@@ -1068,7 +1231,7 @@ function ReworkSection({
 
   return (
     <div style={{ marginBottom: 20 }}>
-      <StatGroup label="Retrabalho em Desenvolvimento — concluídos na sprint" cards={cards} />
+      <StatGroup label="Retrabalho em Desenvolvimento — concluídos na sprint" cards={cards} anchor="rework" />
       {all.length > 0 && (
         <div style={{ ...cardStyle(), marginTop: 12 }}>
           <div style={{ fontSize: 14, fontWeight: 'bold', color: BrandColors.developer }}>
@@ -1183,7 +1346,7 @@ function TaggedQueueSection({
 
   return (
     <div style={{ marginBottom: 20 }}>
-      <StatGroup label={`Fila com a tag "${settings.tagFilter}" — tempo até ser pego`} cards={cards} />
+      <StatGroup label={`Fila com a tag "${settings.tagFilter}" — tempo até ser pego`} cards={cards} anchor="queue" />
     </div>
   );
 }

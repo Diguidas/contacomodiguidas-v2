@@ -1,0 +1,157 @@
+/* Visão do time: menu lateral da própria tela (abas + seções de cada aba) */
+
+.team-layout {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.team-side {
+  width: 248px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  padding: 12px;
+  background: #fff;
+  border-right: 1px solid #e2e8f0;
+}
+
+.team-side-group {
+  margin-bottom: 4px;
+}
+
+.team-side-tab {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 10px;
+  background: none;
+  color: #475569;
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.team-side-tab:hover {
+  background: #f8fafc;
+}
+
+.team-side-tab.active {
+  background: #ffedd5;
+  color: #c2410c;
+  font-weight: 700;
+}
+
+.team-side-sub {
+  display: flex;
+  flex-direction: column;
+  margin: 4px 0 8px 22px;
+  padding-left: 8px;
+  border-left: 2px solid #e2e8f0;
+}
+
+.team-side-item {
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: #64748b;
+  font-family: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.team-side-item:hover {
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+.team-side-item.active {
+  color: #c2410c;
+  font-weight: 600;
+}
+
+.team-body {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+/* celular: o menu vira uma linha com as 4 abas (as seções ficam só no PC) */
+@media (max-width: 760px) {
+  .team-layout {
+    flex-direction: column;
+  }
+
+  .team-side {
+    display: flex;
+    gap: 2px;
+    width: auto;
+    padding: 6px;
+    overflow: visible;
+    border-right: none;
+    border-bottom: 1px solid #e2e8f0;
+  }
+
+  .team-side-group {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+  }
+
+  .team-side-tab {
+    justify-content: center;
+    padding: 0 4px;
+    font-size: 12px;
+    text-align: center;
+  }
+
+  .team-side-tab svg {
+    display: none;
+  }
+
+  .team-side-sub {
+    display: none;
+  }
+}
+
+/* Dashboard: o menu lateral só tem as seções; os filtros ficam na página */
+
+.dash-nav-title {
+  display: block;
+  margin: 0 0 4px 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: #94a3b8;
+}
+
+.dash-nav .team-side-tab span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* celular: sem menu de seções, a tela inteira rola junto */
+@media (max-width: 760px) {
+  .team-layout.dash {
+    display: block;
+    overflow: auto;
+  }
+
+  .team-layout.dash .team-side {
+    display: none;
+  }
+
+  .team-layout.dash .team-body {
+    overflow: visible;
+  }
+}

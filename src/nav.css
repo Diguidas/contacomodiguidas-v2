@@ -1,0 +1,391 @@
+/* Navegação: barra superior (desktop) + barra inferior (celular).
+   Mesmo desenho do redespacho-dashboard, com a paleta do Pole Performance. */
+
+:root {
+  --nav-orange: #ea580c;
+  --nav-orange-dark: #c2410c;
+  --nav-orange-light: #ffedd5;
+  --nav-ink: #0f172a;
+  --nav-line: #e2e8f0;
+}
+
+.nav-topbar {
+  position: relative;
+  z-index: 30;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  height: 60px;
+  padding: 0 28px;
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--nav-line);
+}
+
+.nav-brand {
+  flex-shrink: 0;
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  color: var(--nav-orange);
+}
+
+.nav-tabs {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  height: 100%;
+  flex: 1;
+  min-width: 0;
+}
+
+/* cópia invisível de todas as abas, só pra medir quantas cabem */
+.nav-tabs-measure {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  gap: 4px;
+  width: max-content;
+  height: 100%;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.nav-more {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+}
+
+.nav-more-panel {
+  position: absolute;
+  top: calc(100% + 1px);
+  left: 0;
+  min-width: 220px;
+  padding: 6px;
+  background: #fff;
+  border: 1px solid var(--nav-line);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.14);
+}
+
+.nav-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 0 14px;
+  border: none;
+  background: none;
+  color: #64748b;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.nav-tab:hover {
+  color: var(--nav-ink);
+}
+
+.nav-tab.active {
+  color: var(--nav-orange-dark);
+  font-weight: 600;
+}
+
+.nav-tab.active::after {
+  content: '';
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 0;
+  height: 3px;
+  border-radius: 3px 3px 0 0;
+  background: var(--nav-orange);
+}
+
+.nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.nav-refresh {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 1px solid var(--nav-line);
+  border-radius: 8px;
+  background: #fff;
+  color: #334155;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.nav-refresh:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* menu do usuário */
+
+.nav-user {
+  position: relative;
+}
+
+.nav-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: var(--nav-orange-light);
+  color: var(--nav-orange-dark);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: box-shadow 0.15s;
+}
+
+.nav-avatar:hover,
+.nav-avatar[aria-expanded='true'] {
+  box-shadow: 0 0 0 3px var(--nav-orange-light);
+}
+
+.nav-user-panel {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  min-width: 220px;
+  padding: 6px;
+  background: #fff;
+  border: 1px solid var(--nav-line);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.14);
+}
+
+.nav-user-header {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--nav-line);
+  line-height: 1.3;
+}
+
+.nav-user-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.nav-user-role {
+  font-size: 11px;
+  font-weight: 500;
+  color: #94a3b8;
+}
+
+.nav-user-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: #475569;
+  font-family: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nav-user-item:hover {
+  background: #f8fafc;
+  color: var(--nav-ink);
+}
+
+.nav-user-item.danger {
+  color: #dc2626;
+}
+
+.nav-user-item.active {
+  color: var(--nav-orange-dark);
+  font-weight: 600;
+}
+
+.nav-made-by {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 10px 12px 6px;
+  border-top: 1px solid var(--nav-line);
+}
+
+.nav-made-by span {
+  font-size: 10px;
+  letter-spacing: 0.3px;
+  color: #b0b9c6;
+}
+
+.nav-made-by img {
+  height: 15px;
+  width: auto;
+  object-fit: contain;
+  opacity: 0.85;
+}
+
+/* barra inferior: só no celular */
+
+.nav-bottom {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .nav-topbar {
+    height: 52px;
+    padding: 0 16px;
+    gap: 12px;
+  }
+
+  .nav-tabs {
+    display: none;
+  }
+
+  .nav-brand {
+    font-size: 17px;
+  }
+
+  .nav-content {
+    padding-bottom: calc(72px + env(safe-area-inset-bottom));
+  }
+
+  .nav-bottom {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    display: flex;
+    justify-content: space-around;
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+    background: rgba(255, 255, 255, 0.94);
+    backdrop-filter: blur(12px);
+    border-top: 1px solid var(--nav-line);
+    box-shadow: 0 -4px 16px rgba(15, 23, 42, 0.05);
+  }
+
+  .nav-bottom-tab {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    padding: 6px 4px;
+    border: none;
+    border-radius: 12px;
+    background: none;
+    color: #94a3b8;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 500;
+    text-align: center;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .nav-bottom-tab.active {
+    color: var(--nav-orange-dark);
+    font-weight: 700;
+  }
+
+  .nav-bottom-tab.active svg {
+    background: var(--nav-orange-light);
+    box-sizing: content-box;
+    padding: 4px 14px;
+    border-radius: 999px;
+  }
+}
+
+/* gaveta "Mais" do celular */
+
+.nav-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: none;
+  background: rgba(15, 23, 42, 0.35);
+}
+
+@media (max-width: 760px) {
+  .nav-sheet-backdrop {
+    display: flex;
+    align-items: flex-end;
+  }
+
+  .nav-sheet {
+    width: 100%;
+    padding: 8px 12px calc(16px + env(safe-area-inset-bottom));
+    background: #fff;
+    border-radius: 18px 18px 0 0;
+    box-shadow: 0 -8px 32px rgba(15, 23, 42, 0.18);
+    animation: nav-sheet-up 0.18s ease-out;
+  }
+
+  .nav-sheet-handle {
+    width: 36px;
+    height: 4px;
+    margin: 4px auto 10px;
+    border-radius: 999px;
+    background: #cbd5e1;
+  }
+
+  .nav-sheet-item {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    padding: 14px 12px;
+    border: none;
+    border-radius: 12px;
+    background: none;
+    color: #334155;
+    font-family: inherit;
+    font-size: 15px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .nav-sheet-item.active {
+    background: var(--nav-orange-light);
+    color: var(--nav-orange-dark);
+    font-weight: 600;
+  }
+}
+
+@keyframes nav-sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}

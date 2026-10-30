@@ -53,7 +53,7 @@ export class AppSettings {
   readonly tagFilter: string;
 
   // Per-person override of which stage counts as "their" work in the team
-  // rankings (Ranking de execução própria / Health Score Velocidade) —
+  // rankings (Ranking de execução própria) —
   // display name -> 'geral' or 'desenvolvimento'. A name with no entry here
   // falls back to auto-detection (whichever stage they accumulated more
   // time in).
