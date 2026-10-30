@@ -105,7 +105,10 @@ function analyze(items: WorkItem[], settings: AppSettings, sprint: Sprint | null
   const names = [...new Set([...closedBy.keys(), ...openBy.keys()])];
 
   const teamMedianCycle = median(closed.map((m) => m.inProgressCycleDays));
-  const teamMedianWorked = median(closed.map((m) => m.workedDays));
+  // Baseline for "Demora acima do time" ignores the flash cards (closed in
+  // under 1h or with no trace) — they'd drag the team's "normal" down and
+  // make everyone else look slow.
+  const teamMedianWorked = median(closed.filter((m) => !m.isSuspicious).map((m) => m.workedDays));
   const teamMedianClosedCount = median([...closedBy.values()].map((l) => l.length));
   const teamMedianOpenCount = median([...openBy.values()].map((l) => l.length));
   const now = new Date();
@@ -193,7 +196,7 @@ function analyze(items: WorkItem[], settings: AppSettings, sprint: Sprint | null
           title: 'Demora acima do time',
           detail:
             `Tempo trabalhado mediano de ${formatDuration(own)} (time: ${formatDuration(teamMedianWorked)}), ` +
-            `já descontando o tempo esperando fila, usuário e fornecedor.`,
+            `já descontando o tempo esperando fila, usuário e fornecedor. A referência do time ignora os cards suspeitos.`,
           cards: [...done]
             .sort((a, b) => b.workedDays - a.workedDays)
             .slice(0, MAX_CARDS_PER_FLAG)
@@ -319,7 +322,7 @@ function RulesLegend() {
     { color: FLAG_COLORS.suspect, text: `Itens suspeitos — ${SUSPECT_MIN}+ concluídos em menos de 1h ou quase sem rastro nas colunas.` },
     { color: FLAG_COLORS.load, text: `Muitos cards abertos — ${LOAD_MIN_OPEN}+ abertos e pelo menos ${LOAD_RATIO}× a mediana do time.` },
     { color: FLAG_COLORS.stuck, text: `Cards parados — sem mudar de coluna há mais de ${STUCK_DAYS} dias (fora Usuário e Fornecedor).` },
-    { color: FLAG_COLORS.slow, text: `Demora acima do time — ${SLOW_MIN_CLOSED}+ concluídos e tempo trabalhado mediano > ${SLOW_RATIO}× o do time.` },
+    { color: FLAG_COLORS.slow, text: `Demora acima do time — ${SLOW_MIN_CLOSED}+ concluídos e tempo trabalhado mediano > ${SLOW_RATIO}× o do time (a referência do time ignora os cards suspeitos/relâmpago).` },
   ];
   return (
     <div style={{ ...cardStyle(), padding: '12px 16px' }}>

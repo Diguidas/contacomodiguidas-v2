@@ -708,14 +708,17 @@ export function TeamDashboardScreen({
   })();
 
   function waitRanking(metrics: ItemMetric[], daysOf: (m: ItemMetric) => number): WaitRanking[] {
-    const byName = groupBy(metrics, (m) => m.item.assignedTo.trim());
-    byName.delete('');
+    // Unassigned cards stay visible under their own row — a card waiting in
+    // Triagem/Fornecedor with nobody on it is exactly a bottleneck.
+    const byName = groupBy(metrics, (m) => m.item.assignedTo.trim() || 'Sem responsável');
     const rows = [...byName.entries()].map(([name, list]) => ({ name, count: list.length, totalDays: list.reduce((s, m) => s + daysOf(m), 0), items: list }));
     rows.sort((a, b) => b.totalDays - a.totalDays);
     return rows;
   }
   function openIn(columns: Set<string>): ItemMetric[] {
-    return allMetrics.filter((m) => !m.done && boardColumnMatches(columns, m.item.currentBoardColumn));
+    // Live state, not scoped to the selected sprint: these boxes say "agora",
+    // and sprint scoping drops cards sitting in Triagem/Fornecedor.
+    return liveMetrics.filter((m) => !m.done && boardColumnMatches(columns, m.item.currentBoardColumn));
   }
   const triageWaitRanking = waitRanking(openIn(settings.triageColumnSet), (m) => m.triageDays);
   const queueWaitRanking = waitRanking(openIn(settings.queueColumnSet), (m) => m.queueDays);
@@ -765,12 +768,10 @@ export function TeamDashboardScreen({
     ? 'Concluídos na sprint com Cycle Time muito acima do normal, os que mais pesam na média (máx. 5).'
     : 'Concluídos na sprint com Cycle Time muito acima do normal. Precisa de pelo menos 5 concluídos na sprint pra calcular o corte.';
 
-  const vendorMetrics = allMetrics
-    .filter((m) => !m.done && boardColumnMatches(settings.vendorColumnSet, m.item.currentBoardColumn))
-    .sort((a, b) => b.vendorDays - a.vendorDays);
-  const userWaitMetrics = allMetrics
-    .filter((m) => !m.done && boardColumnMatches(settings.userColumnSet, m.item.currentBoardColumn))
-    .sort((a, b) => b.userDays - a.userDays);
+  // Live, like the wait boxes above: sprint scoping drops cards sitting in
+  // Fornecedor (they never count as "entraram").
+  const vendorMetrics = openIn(settings.vendorColumnSet).sort((a, b) => b.vendorDays - a.vendorDays);
+  const userWaitMetrics = openIn(settings.userColumnSet).sort((a, b) => b.userDays - a.userDays);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
