@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Bar, BarChart, CartesianGrid, Cell, LabelList, Pie, PieChart, ResponsiveContainer, XAxis, YAxis } from 'recharts';
+import { Bar, BarChart, CartesianGrid, Cell, Legend, LabelList, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { boardColumnMatches, WorkItem } from '../models/workItem';
+import type { FieldChange } from '../models/workItem';
 import { formatDuration, ItemMetric, MetricsCalculator, MetricsSummary } from '../services/metricsService';
 import {
   backlogToDoneDays,
@@ -10,7 +11,7 @@ import {
   priorityLabelOf,
 } from '../services/labelConsistencyService';
 import { AppSettings } from '../services/settingsService';
-import { Sprint } from '../services/sprintService';
+import { Sprint, SprintService } from '../services/sprintService';
 import {
   attributedGroupBy,
   buildPerformanceRanking,
@@ -32,6 +33,8 @@ import {
   Inbox,
   LayoutList,
   MousePointerClick,
+  Scale,
+  Shuffle,
   Star,
   Trophy,
   Truck,
@@ -40,13 +43,13 @@ import {
   Zap,
 } from 'lucide-react';
 
-type TeamTab = 0 | 1 | 2 | 3;
+type TeamTab = 0 | 1 | 2 | 3 | 4;
 const TEAM_TAB_KEY = 'team:tab';
 
 function loadStoredTab(): TeamTab {
   try {
     const stored = Number(sessionStorage.getItem(TEAM_TAB_KEY));
-    if (stored === 0 || stored === 1 || stored === 2 || stored === 3) return stored;
+    if (stored === 0 || stored === 1 || stored === 2 || stored === 3 || stored === 4) return stored;
   } catch {
     // sessionStorage unavailable — fall through to the default.
   }
@@ -163,6 +166,12 @@ function enteredInSprintLocal(m: ItemMetric, sprint: Sprint | null, triageColumn
   return !boardColumnMatches(triageColumns, columnNow) && !notInFlow.has(columnNow.trim().toLowerCase());
 }
 
+const TYPE_TREND_SPRINTS = 6; // gráficos de Melhoria X Incidente: a sprint selecionada e as 5 anteriores
+const TYPE_AUDIT_SPRINTS = 4; // janela: a sprint selecionada e as 3 anteriores
+const TYPE_AUDIT_MIN_CARDS = 5; // mínimo de cards de cada tipo pra comparar
+const TYPE_AUDIT_SLOW_FACTOR = 2; // incidente lento = mais de 2× a mediana dos incidentes
+const TYPE_AUDIT_FAST_FACTOR = 0.5; // melhoria relâmpago = menos de 0,5× a mediana das melhorias
+
 interface SuspiciousRanking {
   name: string;
   completed: number;
@@ -262,7 +271,8 @@ interface AreaStats {
 /** The 5 headline numbers behind every comparison tile (área/setor/tipo de
  * demanda) and the top KPI strip — computed once here so all of them stay
  * perfectly consistent instead of each widget recomputing its own version.
- * Cycle Time here runs from the card's first "Em Andamento" to its conclusion. */
+ * Cycle Time here is the official one (`inProgressCycleDays`): total time minus
+ * Triagem/New/Backlog/Removed/Sem retorno do usuário, averaged over the closed cards. */
 function computeAreaStats(metrics: ItemMetric[], sprint: Sprint | null, triageColumns: Set<string>): AreaStats {
   const entered = metrics.filter((m) => enteredInSprintLocal(m, sprint, triageColumns));
   const closed = metrics.filter((m) => endedInSprintLocal(m, sprint));
@@ -567,6 +577,90 @@ export function TeamDashboardScreen({
   // because every other ranking on this screen groups by assignedTo and
   // silently drops the empty-name bucket.
   const unassignedOpenItems = rawMetrics.filter((m) => !m.done && m.item.assignedTo.trim() === '').sort((a, b) => b.totalDays - a.totalDays);
+
+  // Cards closed in the selected sprint that changed hands or changed Tipo de
+  // solicitação along the way. The first assignment (nobody -> someone) and
+  // a first fill-in of the type are triage, not a change, so they don't count.
+  const closedInSprint = allMetrics.filter((m) => endedInSprintLocal(m, selectedSprint));
+  const reassignedItems = closedInSprint
+    .map((m) => ({ m, changes: m.item.assigneeChanges.filter((c) => c.from !== '' && c.to !== '') }))
+    .filter((r) => r.changes.length > 0)
+    .sort((a, b) => b.changes.length - a.changes.length);
+  const retypedItems = closedInSprint
+    .map((m) => ({ m, changes: m.item.requestTypeChanges.filter((c) => c.from !== '' && c.to !== '') }))
+    .filter((r) => r.changes.length > 0)
+    .sort((a, b) => b.changes.length - a.changes.length);
+
+  // Evidence for (or against) needing a "Correção" type: Incidente should close
+  // fast and Melhoria slower, so an Incidente far slower than the typical one
+  // (or a Melhoria far quicker) is probably a mislabelled fix. Uses worked time
+  // (queue/user/vendor waits discounted) over the last few sprints — one sprint
+  // alone has too few cards of each type. Suspicious cards are left out: they
+  // have their own list and would skew the medians.
+  const typeAudit = (() => {
+    const windowStart =
+      selectedSprint == null ? null : new SprintService().sprintFor(selectedSprint.number - (TYPE_AUDIT_SPRINTS - 1)).start;
+    const closed = rawMetrics.filter((m) => {
+      if (!m.done || m.endDate == null || m.isSuspicious) return false;
+      if (selectedSprint == null || windowStart == null) return true;
+      const rangeEnd = new Date(selectedSprint.end.getTime() + 24 * 60 * 60 * 1000);
+      return m.endDate.getTime() >= windowStart.getTime() && m.endDate.getTime() <= rangeEnd.getTime();
+    });
+    const ofType = (type: string) => closed.filter((m) => m.item.requestType.trim().toLowerCase() === type);
+    const incidents = ofType('incidente');
+    const improvements = ofType('melhoria');
+    const enough = incidents.length >= TYPE_AUDIT_MIN_CARDS && improvements.length >= TYPE_AUDIT_MIN_CARDS;
+    const medIncident = incidents.length === 0 ? 0 : median(incidents.map((m) => m.workedDays));
+    const medImprovement = improvements.length === 0 ? 0 : median(improvements.map((m) => m.workedDays));
+    return {
+      incidents,
+      improvements,
+      enough,
+      medIncident,
+      medImprovement,
+      slowerThanImprovement: incidents.filter((m) => m.workedDays > medImprovement).length,
+      slowIncidents: enough
+        ? incidents
+            .filter((m) => endedInSprintLocal(m, selectedSprint) && m.workedDays > medIncident * TYPE_AUDIT_SLOW_FACTOR)
+            .sort((a, b) => b.workedDays - a.workedDays)
+        : [],
+      fastImprovements: enough
+        ? improvements
+            .filter((m) => endedInSprintLocal(m, selectedSprint) && m.workedDays < medImprovement * TYPE_AUDIT_FAST_FACTOR)
+            .sort((a, b) => a.workedDays - b.workedDays)
+        : [],
+    };
+  })();
+
+  // Open cards (live, whole team) with a deadline gone or about to go, and the
+  // ones whose owner keeps moving the deadline.
+  const openWithDeadline = liveMetrics.filter((m) => !m.done && m.item.targetDate != null);
+  const deadlinesAtRisk = openWithDeadline
+    .filter((m) => daysToDeadline(m.item) <= DEADLINE_SOON_DAYS)
+    .sort((a, b) => daysToDeadline(a.item) - daysToDeadline(b.item));
+  const deadlinesMoving = liveMetrics
+    .filter((m) => !m.done && m.item.deadlineChangeCount > 0)
+    .sort((a, b) => b.item.deadlineChangeCount - a.item.deadlineChangeCount);
+
+  // Cards of one request type per sprint, oldest first, ending at the selected
+  // sprint (or the current one). "Abertos" = created in the sprint; "Concluídos"
+  // = closed in it.
+  const typeTrend = (() => {
+    const service = new SprintService();
+    const lastNumber = selectedSprint?.number ?? service.sprintNumberContaining(new Date());
+    const sprintsInWindow: Sprint[] = [];
+    for (let n = lastNumber - (TYPE_TREND_SPRINTS - 1); n <= lastNumber; n++) sprintsInWindow.push(service.sprintFor(n));
+    const series = (type: string): TypeTrendPoint[] =>
+      sprintsInWindow.map((sprint) => {
+        const ofType = rawMetrics.filter((m) => m.item.requestType.trim().toLowerCase() === type);
+        return {
+          label: `S${sprint.number}`,
+          opened: ofType.filter((m) => createdInSprintLocal(m.item, sprint)).length,
+          closed: ofType.filter((m) => endedInSprintLocal(m, sprint)).length,
+        };
+      });
+    return { improvements: series('melhoria'), incidents: series('incidente') };
+  })();
 
   const suspiciousRanking: SuspiciousRanking[] = (() => {
     // Deliberately plain assignedTo, no tag-credit: a suspicious item is a
@@ -892,6 +986,25 @@ export function TeamDashboardScreen({
                 </div>
               </div>
               <div style={{ height: 36 }} />
+              <Anchor id="ov-deadlines" />
+              <SectionHeader
+                icon={<Calendar size={17} strokeWidth={1.75} />}
+                iconColor={BrandColors.danger}
+                title="Prazos — vencidos e a vencer"
+                subtitle={`Cards em aberto do time cujo prazo atual já passou ou vence nos próximos ${DEADLINE_SOON_DAYS} dias — ao vivo, sem olhar a sprint selecionada. Quem vence primeiro (ou está mais atrasado) vem no topo.`}
+              />
+              <div style={{ height: 12 }} />
+              <DeadlineTable metrics={deadlinesAtRisk} showChanges={false} emptyMessage={`Nenhum card em aberto vencido ou vencendo em ${DEADLINE_SOON_DAYS} dias.`} />
+              <div style={{ height: 28 }} />
+              <SectionHeader
+                icon={<Shuffle size={17} strokeWidth={1.75} />}
+                iconColor={BrandColors.warning}
+                title="Prazo sendo alterado"
+                subtitle="Cards em aberto cujo responsável remarcou o prazo depois de defini-lo — quanto mais alterações, menos confiável a data. Só conta remarcação feita pelo próprio responsável do card."
+              />
+              <div style={{ height: 12 }} />
+              <DeadlineTable metrics={deadlinesMoving} showChanges emptyMessage="Nenhum card em aberto com prazo remarcado." />
+              <div style={{ height: 36 }} />
               <Anchor id="ov-aging" />
               <SectionHeader
                 icon={<BarChart3 size={17} strokeWidth={1.75} />}
@@ -950,6 +1063,25 @@ export function TeamDashboardScreen({
               />
               <div style={{ height: 12 }} />
               <ItemListTable metrics={unassignedOpenItems} valueLabel="Dias aberto" valueSelector={(m) => m.totalDays} />
+              <div style={{ height: 28 }} />
+              <Anchor id="perf-moves" />
+              <SectionHeader
+                icon={<Shuffle size={17} strokeWidth={1.75} />}
+                iconColor={BrandColors.queue}
+                title="Mudou de responsável"
+                subtitle="Cards concluídos na sprint que passaram de uma pessoa para outra antes de fechar. A primeira atribuição (de ninguém para alguém) não conta. Muitas trocas no mesmo card indicam triagem ruim ou falta de dono claro."
+              />
+              <div style={{ height: 12 }} />
+              <FieldChangesTable rows={reassignedItems} fromToLabel="Responsáveis" />
+              <div style={{ height: 28 }} />
+              <SectionHeader
+                icon={<Shuffle size={17} strokeWidth={1.75} />}
+                iconColor={BrandColors.vendor}
+                title="Mudou de tipo de solicitação"
+                subtitle="Cards concluídos na sprint cujo tipo de solicitação foi trocado depois de preenchido — sinal de classificação errada na entrada."
+              />
+              <div style={{ height: 12 }} />
+              <FieldChangesTable rows={retypedItems} fromToLabel="Tipos" />
               <div style={{ height: 28 }} />
               <Anchor id="perf-rank" />
               <SectionHeader
@@ -1154,7 +1286,68 @@ export function TeamDashboardScreen({
               <ItemListTable metrics={userWaitMetrics} valueLabel="Dias aguardando" valueSelector={(m) => m.userDays} />
             </>
           )}
-          {tab === 3 && <RatingsTab ratingsLoading={ratingsLoading} />}
+          {tab === 3 && (
+            <>
+              <Anchor id="mi-improvements" />
+              <SectionHeader
+                icon={<BarChart3 size={17} strokeWidth={1.75} />}
+                iconColor={BrandColors.queue}
+                title="Melhorias"
+                subtitle={`Cards de Melhoria abertos e concluídos em cada uma das últimas ${TYPE_TREND_SPRINTS} sprints (a selecionada e as anteriores).`}
+              />
+              <div style={{ height: 12 }} />
+              <TypeTrendChart data={typeTrend.improvements} color={BrandColors.queue} />
+              <div style={{ height: 28 }} />
+              <Anchor id="mi-incidents" />
+              <SectionHeader
+                icon={<AlertTriangle size={17} strokeWidth={1.75} />}
+                iconColor={BrandColors.danger}
+                title="Incidentes"
+                subtitle={`Cards de Incidente abertos e concluídos em cada uma das últimas ${TYPE_TREND_SPRINTS} sprints (a selecionada e as anteriores).`}
+              />
+              <div style={{ height: 12 }} />
+              <TypeTrendChart data={typeTrend.incidents} color={BrandColors.danger} />
+              <div style={{ height: 28 }} />
+              <Anchor id="mi-audit" />
+              <SectionHeader
+                icon={<AlertTriangle size={17} strokeWidth={1.75} />}
+                iconColor={BrandColors.danger}
+                title="Incidentes lentos e melhorias relâmpago"
+                subtitle={`Incidente deveria fechar rápido e Melhoria levar mais tempo. Aqui ficam os que fogem disso — candidatos a tipo mal escolhido (um conserto sem urgência marcado como Incidente, ou uma correção rápida marcada como Melhoria). Tempo trabalhado, descontando fila, usuário e fornecedor, nas últimas ${TYPE_AUDIT_SPRINTS} sprints até a selecionada; cards suspeitos ficam de fora.`}
+              />
+              <div style={{ height: 12 }} />
+              {!typeAudit.enough ? (
+                <div style={{ ...cardStyle(), padding: 16, color: '#64748B' }}>
+                  Poucos cards concluídos pra comparar: {typeAudit.incidents.length} Incidente(s) e {typeAudit.improvements.length} Melhoria(s) na janela
+                  (mínimo de {TYPE_AUDIT_MIN_CARDS} de cada).
+                </div>
+              ) : (
+                <>
+                  <div style={{ ...cardStyle(), padding: 16, display: 'flex', flexWrap: 'wrap', gap: 24 }}>
+                    <CompactStat value={`${typeAudit.incidents.length}`} label="Incidentes concluídos" />
+                    <CompactStat value={formatDuration(typeAudit.medIncident)} label="Mediana de Incidente" />
+                    <CompactStat value={`${typeAudit.improvements.length}`} label="Melhorias concluídas" />
+                    <CompactStat value={formatDuration(typeAudit.medImprovement)} label="Mediana de Melhoria" />
+                    <CompactStat
+                      value={`${typeAudit.slowerThanImprovement} de ${typeAudit.incidents.length}`}
+                      label="Incidentes mais lentos que a Melhoria mediana"
+                    />
+                  </div>
+                  <div style={{ height: 16 }} />
+                  <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>
+                    Incidentes concluídos nesta sprint com mais de {TYPE_AUDIT_SLOW_FACTOR}× a mediana de {formatDuration(typeAudit.medIncident)} ({typeAudit.slowIncidents.length})
+                  </div>
+                  <TypeAuditByOwner metrics={typeAudit.slowIncidents} />
+                  <div style={{ height: 20 }} />
+                  <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>
+                    Melhorias concluídas nesta sprint com menos de {TYPE_AUDIT_FAST_FACTOR}× a mediana de {formatDuration(typeAudit.medImprovement)} ({typeAudit.fastImprovements.length})
+                  </div>
+                  <TypeAuditByOwner metrics={typeAudit.fastImprovements} />
+                </>
+              )}
+            </>
+          )}
+          {tab === 4 && <RatingsTab ratingsLoading={ratingsLoading} />}
         </div>
       </div>
       </div>
@@ -1197,6 +1390,7 @@ const TEAM_NAV: { icon: ReactNode; label: string; items: { id: string; label: st
       { id: 'ov-cross', label: 'Complexidade x prioridade' },
       { id: 'ov-offenders', label: 'Cards que puxaram o Cycle Time' },
       { id: 'ov-groups', label: 'Por setor e tipo de demanda' },
+      { id: 'ov-deadlines', label: 'Prazos' },
       { id: 'ov-aging', label: 'Aging' },
       { id: 'ov-oldest', label: 'Cards mais antigos' },
     ],
@@ -1208,6 +1402,7 @@ const TEAM_NAV: { icon: ReactNode; label: string; items: { id: string; label: st
       { id: 'perf-wipcol', label: 'WIP por coluna' },
       { id: 'perf-wip', label: 'Carga de trabalho (WIP)' },
       { id: 'perf-orphans', label: 'Cards sem responsável' },
+      { id: 'perf-moves', label: 'Mudou de responsável / tipo' },
       { id: 'perf-rank', label: 'Ranking de performance' },
       { id: 'perf-suspicious', label: 'Itens suspeitos' },
       { id: 'perf-predict', label: 'Previsibilidade de prazo' },
@@ -1226,6 +1421,15 @@ const TEAM_NAV: { icon: ReactNode; label: string; items: { id: string; label: st
       { id: 'wait-vendor', label: 'Aguardando Fornecedor' },
       { id: 'wait-vendor-list', label: 'Cards com Fornecedor' },
       { id: 'wait-user-list', label: 'Cards com Usuário' },
+    ],
+  },
+  {
+    icon: <Scale size={16} strokeWidth={2} />,
+    label: 'Melhoria X Incidente',
+    items: [
+      { id: 'mi-improvements', label: 'Melhorias por sprint' },
+      { id: 'mi-incidents', label: 'Incidentes por sprint' },
+      { id: 'mi-audit', label: 'Incidentes lentos / melhorias relâmpago' },
     ],
   },
   { icon: <Star size={16} strokeWidth={2} />, label: 'Avaliação', items: [] },
@@ -1688,10 +1892,7 @@ function ComparisonPanel({
   );
 }
 
-/** A simpler "how many entered vs. closed" breakdown for a dimension that
- * doesn't need the full comparison-tile treatment (setor, tipo de demanda) —
- * one row per group, sorted by volume. Trades the tile grid's density for a
- * quieter, scannable table. */
+
 function GroupCountTable({
   title,
   groups,
@@ -1826,7 +2027,27 @@ function Td({ children }: { children: ReactNode }) {
   return <td style={{ textAlign: 'left', padding: '8px 12px', borderBottom: `1px solid ${BrandColors.border}`, whiteSpace: 'nowrap' }}>{children}</td>;
 }
 
-function TableCard({ children, emptyMessage, isEmpty }: { children: ReactNode; emptyMessage: string; isEmpty: boolean }) {
+const TABLE_PREVIEW_ROWS = 10;
+
+/** Caps a long table at a preview and gives back a "Ver todos / Ver menos" footer. */
+function useRowLimit<T>(rows: T[], limit = TABLE_PREVIEW_ROWS): { shown: T[]; footer: ReactNode } {
+  const [expanded, setExpanded] = useState(false);
+  const overflow = rows.length > limit;
+  const shown = overflow && !expanded ? rows.slice(0, limit) : rows;
+  const footer = overflow ? (
+    <div style={{ padding: '8px 12px', borderTop: `1px solid ${BrandColors.border}`, display: 'flex', alignItems: 'center', gap: 10, fontSize: 12, color: '#64748B' }}>
+      <span>
+        Mostrando {shown.length} de {rows.length}
+      </span>
+      <button onClick={() => setExpanded((v) => !v)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: BrandColors.primary, fontWeight: 600, fontSize: 12 }}>
+        {expanded ? 'Ver menos' : 'Ver todos'}
+      </button>
+    </div>
+  ) : null;
+  return { shown, footer };
+}
+
+function TableCard({ children, emptyMessage, isEmpty, footer }: { children: ReactNode; emptyMessage: string; isEmpty: boolean; footer?: ReactNode }) {
   if (isEmpty) {
     return (
       <div style={{ ...cardStyle(), padding: 16 }}>
@@ -1837,6 +2058,7 @@ function TableCard({ children, emptyMessage, isEmpty }: { children: ReactNode; e
   return (
     <div style={{ ...cardStyle(), overflow: 'hidden' }}>
       <div style={{ overflowX: 'auto' }}>{children}</div>
+      {footer}
     </div>
   );
 }
@@ -2582,9 +2804,223 @@ function CompactWaitList({ rows, color, onRowClick }: { rows: WaitRanking[]; col
   );
 }
 
-function ItemListTable({ metrics, valueLabel, valueSelector }: { metrics: ItemMetric[]; valueLabel: string; valueSelector: (m: ItemMetric) => number }) {
+const DEADLINE_SOON_DAYS = 5;
+
+function startOfDayMs(d: Date): number {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
+/** Calendar days from today to the card's current deadline — negative once
+ * it's gone. A deadline is valid through the end of its own day, so due
+ * today is 0, not overdue yet. */
+function daysToDeadline(item: WorkItem): number {
+  return Math.round((startOfDayMs(item.targetDate!) - startOfDayMs(new Date())) / (24 * 60 * 60 * 1000));
+}
+
+function deadlineStatus(days: number): { label: string; color: string } {
+  if (days < 0) return { label: `Vencido há ${-days} ${-days === 1 ? 'dia' : 'dias'}`, color: BrandColors.danger };
+  if (days === 0) return { label: 'Vence hoje', color: BrandColors.danger };
+  return { label: `Vence em ${days} ${days === 1 ? 'dia' : 'dias'}`, color: BrandColors.warning };
+}
+
+/** Open cards with their current deadline; with `showChanges`, also how many
+ * times it was moved and what it originally was. */
+function DeadlineTable({ metrics: allMetrics, showChanges, emptyMessage }: { metrics: ItemMetric[]; showChanges: boolean; emptyMessage: string }) {
+  const { shown: metrics, footer } = useRowLimit(allMetrics);
   return (
-    <TableCard isEmpty={metrics.length === 0} emptyMessage="Nenhum item nesta lista.">
+    <TableCard isEmpty={allMetrics.length === 0} emptyMessage={emptyMessage} footer={footer}>
+      <table style={tableStyle()}>
+        <thead>
+          <tr>
+            <Th>ID</Th>
+            <Th>Título</Th>
+            <Th>Responsável</Th>
+            <Th>Coluna</Th>
+            <Th>Prazo atual</Th>
+            <Th>Situação</Th>
+            {showChanges && <Th>Alterações</Th>}
+            {showChanges && <Th>Prazo original</Th>}
+          </tr>
+        </thead>
+        <tbody>
+          {metrics.map((m) => {
+            const item = m.item;
+            const status = item.targetDate == null ? null : deadlineStatus(daysToDeadline(item));
+            return (
+              <tr key={item.id}>
+                <Td>{item.id}</Td>
+                <Td>
+                  <span style={{ display: 'inline-block', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.title}</span>
+                </Td>
+                <Td>
+                  <ResponsibleTag name={item.assignedTo} />
+                </Td>
+                <Td>{item.currentBoardColumn.trim() || '—'}</Td>
+                <Td>{item.targetDate == null ? '—' : formatDate(item.targetDate)}</Td>
+                <Td>{status == null ? '—' : <span style={{ fontWeight: 600, color: status.color }}>{status.label}</span>}</Td>
+                {showChanges && <Td>{item.deadlineChangeCount}x</Td>}
+                {showChanges && <Td>{item.originalTargetDate == null ? '—' : formatDate(item.originalTargetDate)}</Td>}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </TableCard>
+  );
+}
+
+interface TypeTrendPoint {
+  label: string;
+  opened: number;
+  closed: number;
+}
+
+/** Cards of one request type per sprint: opened vs closed side by side. */
+function TypeTrendChart({ data, color }: { data: TypeTrendPoint[]; color: string }) {
+  const total = data.reduce((s, d) => s + d.opened + d.closed, 0);
+  return (
+    <div style={{ ...cardStyle(), padding: 20 }}>
+      {total === 0 ? (
+        <div style={{ height: 160, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748B', fontSize: 13 }}>
+          Sem cards deste tipo nas últimas sprints.
+        </div>
+      ) : (
+        <div style={{ width: '100%', height: 240 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={data} margin={{ top: 20, right: 8, left: -16, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={BrandColors.border} />
+              <XAxis dataKey="label" tick={{ fontSize: 12 }} />
+              <YAxis allowDecimals={false} tick={{ fontSize: 12 }} />
+              <Tooltip />
+              <Legend />
+              <Bar dataKey="opened" name="Abertos" fill={hexAlpha(color, 0.45)} radius={[4, 4, 0, 0]}>
+                <LabelList dataKey="opened" position="top" style={{ fontSize: 11 }} />
+              </Bar>
+              <Bar dataKey="closed" name="Concluídos" fill={color} radius={[4, 4, 0, 0]}>
+                <LabelList dataKey="closed" position="top" style={{ fontSize: 11 }} />
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The audit lists, one block per responsible (most cards first). */
+function TypeAuditByOwner({ metrics }: { metrics: ItemMetric[] }) {
+  if (metrics.length === 0) return <TypeAuditTable metrics={metrics} showOwner={false} />;
+  const groups = [...groupBy(metrics, (m) => (m.item.assignedTo.trim() === '' ? 'Sem responsável' : m.item.assignedTo.trim())).entries()].sort(
+    (a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]),
+  );
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {groups.map(([name, list]) => (
+        <div key={name}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            <ResponsibleTag name={name} />
+            <span style={{ fontSize: 12, color: '#64748B' }}>
+              {list.length} {list.length === 1 ? 'card' : 'cards'}
+            </span>
+          </div>
+          <TypeAuditTable metrics={list} showOwner={false} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Closed cards of one type with their worked time — for the mislabelled-type audit. */
+function TypeAuditTable({ metrics: allMetrics, showOwner = true }: { metrics: ItemMetric[]; showOwner?: boolean }) {
+  const { shown: metrics, footer } = useRowLimit(allMetrics);
+  return (
+    <TableCard isEmpty={allMetrics.length === 0} emptyMessage="Nenhum card fora do padrão na janela." footer={footer}>
+      <table style={tableStyle()}>
+        <thead>
+          <tr>
+            <Th>ID</Th>
+            <Th>Título</Th>
+            {showOwner && <Th>Responsável</Th>}
+            <Th>Concluído em</Th>
+            <Th>Tempo trabalhado</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {metrics.map((m) => (
+            <tr key={m.item.id}>
+              <Td>{m.item.id}</Td>
+              <Td>
+                <span style={{ display: 'inline-block', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.item.title}</span>
+              </Td>
+              {showOwner && (
+                <Td>
+                  <ResponsibleTag name={m.item.assignedTo} />
+                </Td>
+              )}
+              <Td>{m.endDate == null ? '—' : formatDate(m.endDate)}</Td>
+              <Td>{formatDuration(m.workedDays)}</Td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </TableCard>
+  );
+}
+
+/** Closed cards with the history of one field's changes ("A → B", when, by whom). */
+function FieldChangesTable({
+  rows: allRows,
+  fromToLabel,
+}: {
+  rows: { m: ItemMetric; changes: FieldChange[] }[];
+  fromToLabel: string;
+}) {
+  const { shown: rows, footer } = useRowLimit(allRows);
+  return (
+    <TableCard isEmpty={allRows.length === 0} emptyMessage="Nenhum card concluído na sprint com mudança." footer={footer}>
+      <table style={tableStyle()}>
+        <thead>
+          <tr>
+            <Th>ID</Th>
+            <Th>Título</Th>
+            <Th>Responsável atual</Th>
+            <Th>Mudanças</Th>
+            <Th>{fromToLabel} (de → para)</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(({ m, changes }) => (
+            <tr key={m.item.id}>
+              <Td>{m.item.id}</Td>
+              <Td>
+                <span style={{ display: 'inline-block', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.item.title}</span>
+              </Td>
+              <Td>
+                <ResponsibleTag name={m.item.assignedTo} />
+              </Td>
+              <Td>{changes.length}</Td>
+              <td style={{ textAlign: 'left', padding: '8px 12px', borderBottom: `1px solid ${BrandColors.border}` }}>
+                {changes.map((c, i) => (
+                  <div key={i} style={{ whiteSpace: 'nowrap' }}>
+                    {c.from} → {c.to}{' '}
+                    <span style={{ color: '#64748B', fontSize: 12 }}>
+                      ({formatDate(c.date)}{c.changedBy !== '' ? `, por ${c.changedBy}` : ''})
+                    </span>
+                  </div>
+                ))}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </TableCard>
+  );
+}
+
+function ItemListTable({ metrics: allMetrics, valueLabel, valueSelector }: { metrics: ItemMetric[]; valueLabel: string; valueSelector: (m: ItemMetric) => number }) {
+  const { shown: metrics, footer } = useRowLimit(allMetrics);
+  return (
+    <TableCard isEmpty={allMetrics.length === 0} emptyMessage="Nenhum item nesta lista." footer={footer}>
       <table style={tableStyle()}>
         <thead>
           <tr>

@@ -49,6 +49,9 @@ const NAV_ITEMS: { id: Destination; label: string; icon: (size: number) => React
 // back. `isAdmin` gets checked again here, not just in selectDestination —
 // a stored destination from a previous admin session should never leak
 // through for a "responsável" login on the same browser.
+// Only this login sees the "Solicitantes (30 dias)" section of the Dashboard.
+const REQUESTERS_VIEWER_EMAIL = 'guilherme.franklin@polealimentos.com.br';
+
 function loadStoredDestination(isAdmin: boolean): Destination {
   if (!isAdmin) return 'dashboard';
   try {
@@ -339,6 +342,7 @@ export function AppShell({ appUser, onSignOut }: { appUser: AppUser; onSignOut: 
               onRefresh={() => refresh()}
               onSprintChanged={onSprintChanged}
               lockedResponsible={isAdmin ? undefined : (appUser.responsavelName ?? undefined)}
+              showRequesters={appUser.email.trim().toLowerCase() === REQUESTERS_VIEWER_EMAIL}
             />
           )}
           {destination === 'projects' && (

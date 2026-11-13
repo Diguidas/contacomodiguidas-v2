@@ -6,9 +6,8 @@ import { ItemMetric } from '../services/metricsService';
 import { WorkItem } from '../models/workItem';
 import { AppSettings } from '../services/settingsService';
 import { Sprint, SprintService } from '../services/sprintService';
-import { buildSprintSnapshot, defaultPerformanceGroupKeys, isAttributedTo, performanceGroups, sprintScope, SprintSnapshot } from '../services/sprintSnapshotService';
+import { buildSprintSnapshot, isAttributedTo, personCycleDays, performanceGroups, sprintScope, SprintSnapshot } from '../services/sprintSnapshotService';
 import { BrandColors } from '../theme';
-import { ToggleChip } from '../components/ToggleChip';
 
 const sprintService = new SprintService();
 
@@ -182,8 +181,16 @@ export function HistoryScreen({
 
             <div style={{ height: 28 }} />
             <SectionTitle
+              title="Velocidade × entrega por responsável"
+              subtitle="Cycle Time, volume de concluídos e conversão lado a lado, com uma leitura que cruza os três — Cycle Time caindo só é boa notícia se a pessoa continua entregando."
+            />
+            <div style={{ height: 12 }} />
+            <ResponsibleOverviewTable closedBySprint={closedBySprint} settings={settings} />
+
+            <div style={{ height: 28 }} />
+            <SectionTitle
               title="Cycle Time por responsável"
-              subtitle="Um card por responsável — marque os grupos (Triagem, Fila, Desenvolvedor, Usuário, Fornecedor, Geral) pra ver a evolução do tempo médio dela(e) naquele estágio, nas últimas sprints."
+              subtitle="Um card por responsável com a evolução do Cycle Time médio dos itens concluídos, sprint a sprint."
             />
             <div style={{ height: 12 }} />
             <ResponsibleCycleTimeCards closedBySprint={closedBySprint} settings={settings} />
@@ -465,44 +472,6 @@ function TableCard({ children, isEmpty, emptyMessage }: { children: ReactNode; i
   );
 }
 
-/** Hovering the single summed line shows the "raio-x": how much of that
- * sprint's total came from each selected group. Reads every group's value
- * off the hovered point's own data row (not off `payload`, which only ever
- * carries the one `total` series actually plotted) so the breakdown always
- * matches whichever line is currently drawn. */
-function CycleTimeBreakdownTooltip({
-  active,
-  payload,
-  selected,
-}: {
-  active?: boolean;
-  payload?: { payload: Record<string, string | number | null> }[];
-  selected: Set<string>;
-}) {
-  if (!active || !payload || payload.length === 0) return null;
-  const row = payload[0].payload;
-  const total = row.total;
-  return (
-    <div style={{ backgroundColor: '#fff', border: `1px solid ${BrandColors.border}`, borderRadius: 8, padding: '8px 10px', fontSize: 12, boxShadow: '0 4px 16px rgba(15,23,42,0.1)' }}>
-      <div style={{ fontWeight: 'bold', marginBottom: 6 }}>
-        {row.label} — {typeof total === 'number' ? `${total.toFixed(1)}d total` : '—'}
-      </div>
-      {performanceGroups
-        .filter((g) => selected.has(g.key))
-        .map((g) => {
-          const value = row[g.key];
-          return (
-            <div key={g.key} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '1px 0' }}>
-              <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: GROUP_COLOR[g.key], flexShrink: 0 }} />
-              <span style={{ flex: 1 }}>{g.label}</span>
-              <span style={{ fontWeight: 600 }}>{typeof value === 'number' ? `${value.toFixed(1)}d` : '—'}</span>
-            </div>
-          );
-        })}
-    </div>
-  );
-}
-
 /** Hovering a responsible's conversion line shows the raio-x behind that
  * percentage: how many entraram and how many concluíram that sprint —
  * a "62%" reads very differently as 5/8 versus 62/100. */
@@ -584,11 +553,214 @@ function ResponsibleConversionCards({ closedBySprint, settings }: { closedBySpri
                 </ResponsiveContainer>
               )}
             </div>
+            {(() => {
+              const trend = conversionTrend(data.map((d) => ({ label: d.label, value: d.conversion })));
+              if (trend == null) return null;
+              return (
+                <div style={{ marginTop: 8, fontSize: 12, color: '#475569', display: 'flex', gap: 6, alignItems: 'baseline' }}>
+                  <span style={{ fontWeight: 700, color: trend.color, whiteSpace: 'nowrap' }}>
+                    {trend.arrow} {trend.title}
+                  </span>
+                  <span>{trend.detail}</span>
+                </div>
+              );
+            })()}
           </div>
         );
       })}
     </div>
   );
+}
+
+type TrendDir = 'up' | 'down' | 'stable';
+type TrendInfo = { dir: TrendDir; arrow: string; title: string; color: string; detail: string };
+
+const TREND_STABLE_PCT = 15;
+
+/** Reads a Cycle Time series (lower is better) as "caindo / subindo /
+ * estável": compares the average of the first half of the sprints that have
+ * data against the second half, plus the latest sprint against the one
+ * before it. Needs at least 3 sprints with data to say anything. */
+function cycleTrend(points: { label: string; value: number | null }[]): TrendInfo | null {
+  const withData = points.filter((p): p is { label: string; value: number } => p.value != null);
+  if (withData.length < 3) return null;
+  const half = Math.floor(withData.length / 2);
+  const first = withData.slice(0, half).reduce((s, p) => s + p.value, 0) / half;
+  const secondPoints = withData.slice(withData.length - half);
+  const second = secondPoints.reduce((s, p) => s + p.value, 0) / half;
+  const pct = first === 0 ? 0 : ((second - first) / first) * 100;
+  const last = withData[withData.length - 1];
+  const prev = withData[withData.length - 2];
+  const lastStep = `${prev.label} → ${last.label}: ${prev.value.toFixed(1)}d → ${last.value.toFixed(1)}d`;
+  const range = `Média de ${first.toFixed(1)}d no início para ${second.toFixed(1)}d agora (${pct > 0 ? '+' : ''}${pct.toFixed(0)}%). ${lastStep}.`;
+  if (pct <= -TREND_STABLE_PCT) return { dir: 'down', arrow: '↓', title: 'Caindo (melhorando)', color: '#16A34A', detail: range };
+  if (pct >= TREND_STABLE_PCT) return { dir: 'up', arrow: '↑', title: 'Subindo (piorando)', color: BrandColors.danger, detail: range };
+  return { dir: 'stable', arrow: '→', title: 'Estável', color: '#64748B', detail: range };
+}
+
+/** Days a card sat waiting on the user or the vendor — time that isn't the
+ * responsible's to own. Capped at the Cycle Time shown for that person, and
+ * zero for tag-credited cards (those already count only dev time). */
+function externalWaitDays(m: ItemMetric, name: string, settings: AppSettings): number {
+  const cycle = personCycleDays(m, name, settings);
+  if (cycle === m.cycleTimeDays && cycle !== m.inProgressCycleDays) return 0;
+  return Math.min(m.userDays + m.vendorDays, cycle);
+}
+
+/** Volume trend: average concluídos per sprint, first half vs second half,
+ * counting sprints with zero deliveries (that's the whole point). */
+function volumeTrend(counts: number[]): TrendInfo | null {
+  if (counts.length < 3) return null;
+  const half = Math.floor(counts.length / 2);
+  const first = counts.slice(0, half).reduce((s, c) => s + c, 0) / half;
+  const second = counts.slice(counts.length - half).reduce((s, c) => s + c, 0) / half;
+  const diff = second - first;
+  const limit = Math.max(1, first * 0.25);
+  const detail = `${first.toFixed(1)} → ${second.toFixed(1)} concluídos por sprint`;
+  if (diff >= limit) return { dir: 'up', arrow: '↑', title: 'Entregando mais', color: '#16A34A', detail };
+  if (diff <= -limit) return { dir: 'down', arrow: '↓', title: 'Entregando menos', color: BrandColors.danger, detail };
+  return { dir: 'stable', arrow: '→', title: 'Volume estável', color: '#64748B', detail };
+}
+
+/** Crosses speed (Cycle Time) with delivery (volume + conversão) — a falling
+ * Cycle Time only counts as good news if the person is still delivering. */
+function readingFor(cycle: TrendInfo | null, own: TrendInfo | null, volume: TrendInfo | null, conversion: TrendInfo | null): { text: string; color: string } {
+  if (cycle == null || volume == null) return { text: 'Poucas sprints com dados pra avaliar.', color: '#94A3B8' };
+  const delivery: TrendDir = volume.dir !== 'stable' ? volume.dir : conversion?.dir ?? 'stable';
+  // Cycle Time up, but the person's own time (without waiting on user/vendor)
+  // isn't: the slowdown isn't theirs.
+  if (cycle.dir === 'up' && own != null && own.dir !== 'up') {
+    return { text: 'Cycle Time sobe por espera de usuário/fornecedor — o tempo da própria pessoa não piorou.', color: '#2563EB' };
+  }
+  if (cycle.dir === 'down' && delivery === 'down') return { text: 'Atenção: Cycle Time melhora, mas entrega menos.', color: '#B45309' };
+  if (cycle.dir === 'down') return { text: 'Melhorando de verdade: mais rápido e entregando igual ou mais.', color: '#16A34A' };
+  if (cycle.dir === 'up' && delivery === 'down') return { text: 'Piorando nos dois: mais lento e entregando menos.', color: BrandColors.danger };
+  if (cycle.dir === 'up') return { text: 'Mais lento, mas entregando igual ou mais — vale olhar os cards pesados.', color: '#B45309' };
+  if (delivery === 'down') return { text: 'Velocidade estável, mas entrega caindo.', color: '#B45309' };
+  if (delivery === 'up') return { text: 'Velocidade estável e entregando mais.', color: '#16A34A' };
+  return { text: 'Tudo estável.', color: '#64748B' };
+}
+
+/** One row per responsible: Cycle Time, volume and conversion trends side by
+ * side, plus a reading that crosses them. */
+function ResponsibleOverviewTable({ closedBySprint, settings }: { closedBySprint: SprintClosed[]; settings: AppSettings }) {
+  const names = new Set<string>();
+  for (const { entered, closed } of closedBySprint) {
+    for (const m of [...entered, ...closed]) {
+      const name = m.item.assignedTo.trim();
+      if (name !== '') names.add(name);
+      if (isAttributedTo(m, settings.myDisplayName, settings)) names.add(settings.myDisplayName.trim());
+    }
+  }
+  const rows = [...names].sort((a, b) => a.localeCompare(b)).map((name) => {
+    const perSprint = closedBySprint.map(({ sprint, entered, closed }) => {
+      const mineEntered = entered.filter((m) => isAttributedTo(m, name, settings));
+      const mineClosed = closed.filter((m) => isAttributedTo(m, name, settings));
+      return {
+        label: `S${sprint.number}`,
+        entered: mineEntered.length,
+        closed: mineClosed.length,
+        cycle: average(mineClosed.map((m) => personCycleDays(m, name, settings))),
+        own: average(mineClosed.map((m) => personCycleDays(m, name, settings) - externalWaitDays(m, name, settings))),
+        externalSum: mineClosed.reduce((s, m) => s + externalWaitDays(m, name, settings), 0),
+        cycleSum: mineClosed.reduce((s, m) => s + personCycleDays(m, name, settings), 0),
+        conversion: mineEntered.length === 0 ? null : (mineClosed.length / mineEntered.length) * 100,
+      };
+    });
+    const totalClosed = perSprint.reduce((s, p) => s + p.closed, 0);
+    const cycleSum = perSprint.reduce((s, p) => s + p.cycleSum, 0);
+    const externalSum = perSprint.reduce((s, p) => s + p.externalSum, 0);
+    return {
+      name,
+      totalClosed,
+      externalPct: cycleSum > 0 ? (externalSum / cycleSum) * 100 : null,
+      own: cycleTrend(perSprint.map((p) => ({ label: p.label, value: p.own }))),
+      cycle: cycleTrend(perSprint.map((p) => ({ label: p.label, value: p.cycle }))),
+      volume: volumeTrend(perSprint.map((p) => p.closed)),
+      conversion: conversionTrend(perSprint.map((p) => ({ label: p.label, value: p.conversion }))),
+    };
+  }).filter((r) => r.totalClosed > 0);
+
+  if (rows.length === 0) {
+    return (
+      <div style={{ backgroundColor: '#fff', border: `1px solid ${BrandColors.border}`, borderRadius: 12, padding: 16 }}>
+        <span style={{ color: '#64748B' }}>Sem dados ainda.</span>
+      </div>
+    );
+  }
+
+  const cell = (t: TrendInfo | null) =>
+    t == null ? (
+      <span style={{ color: '#94A3B8' }}>—</span>
+    ) : (
+      <div title={t.detail}>
+        <span style={{ fontWeight: 700, color: t.color }}>
+          {t.arrow} {t.title}
+        </span>
+        <div style={{ fontSize: 11, color: '#94A3B8' }}>{t.detail}</div>
+      </div>
+    );
+
+  return (
+    <TableCard isEmpty={false} emptyMessage="">
+      <table style={tableStyle()}>
+        <thead>
+          <tr>
+            <Th>Responsável</Th>
+            <Th>Concluídos no período</Th>
+            <Th>Cycle Time</Th>
+            <Th>Sem espera de usuário/fornecedor</Th>
+            <Th>Volume</Th>
+            <Th>Conversão</Th>
+            <Th>Leitura</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const reading = readingFor(r.cycle, r.own, r.volume, r.conversion);
+            return (
+              <tr key={r.name}>
+                <Td>
+                  <span style={{ fontWeight: 600 }}>{r.name}</span>
+                </Td>
+                <Td>{r.totalClosed}</Td>
+                <td style={{ padding: '8px 12px', borderBottom: `1px solid ${BrandColors.border}`, verticalAlign: 'top' }}>
+                  {cell(r.cycle)}
+                  {r.externalPct != null && (
+                    <div style={{ fontSize: 11, color: '#2563EB', marginTop: 2 }}>{r.externalPct.toFixed(0)}% do tempo foi espera de usuário/fornecedor</div>
+                  )}
+                </td>
+                <td style={{ padding: '8px 12px', borderBottom: `1px solid ${BrandColors.border}`, verticalAlign: 'top' }}>{cell(r.own)}</td>
+                <td style={{ padding: '8px 12px', borderBottom: `1px solid ${BrandColors.border}`, verticalAlign: 'top' }}>{cell(r.volume)}</td>
+                <td style={{ padding: '8px 12px', borderBottom: `1px solid ${BrandColors.border}`, verticalAlign: 'top' }}>{cell(r.conversion)}</td>
+                <td style={{ padding: '8px 12px', borderBottom: `1px solid ${BrandColors.border}`, verticalAlign: 'top', fontWeight: 600, color: reading.color }}>{reading.text}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </TableCard>
+  );
+}
+
+const CONVERSION_STABLE_PP = 10;
+
+/** Same idea as cycleTrend, for the conversion % series (higher is better):
+ * first half vs second half of the sprints that had items entering, judged in
+ * percentage points. */
+function conversionTrend(points: { label: string; value: number | null }[]): TrendInfo | null {
+  const withData = points.filter((p): p is { label: string; value: number } => p.value != null);
+  if (withData.length < 3) return null;
+  const half = Math.floor(withData.length / 2);
+  const first = withData.slice(0, half).reduce((s, p) => s + p.value, 0) / half;
+  const second = withData.slice(withData.length - half).reduce((s, p) => s + p.value, 0) / half;
+  const diff = second - first;
+  const last = withData[withData.length - 1];
+  const prev = withData[withData.length - 2];
+  const detail = `Média de ${first.toFixed(0)}% no início para ${second.toFixed(0)}% agora (${diff > 0 ? '+' : ''}${diff.toFixed(0)} p.p.). ${prev.label} → ${last.label}: ${prev.value.toFixed(0)}% → ${last.value.toFixed(0)}%.`;
+  if (diff >= CONVERSION_STABLE_PP) return { dir: 'up', arrow: '↑', title: 'Subindo (melhorando)', color: '#16A34A', detail };
+  if (diff <= -CONVERSION_STABLE_PP) return { dir: 'down', arrow: '↓', title: 'Caindo (piorando)', color: BrandColors.danger, detail };
+  return { dir: 'stable', arrow: '→', title: 'Estável', color: '#64748B', detail };
 }
 
 /** One card per responsible with at least one item closed somewhere in the
@@ -597,7 +769,6 @@ function ResponsibleConversionCards({ closedBySprint, settings }: { closedBySpri
  * breaks that total back down per group ("raio-x"), instead of one line per
  * group cluttering the chart. */
 function ResponsibleCycleTimeCards({ closedBySprint, settings }: { closedBySprint: SprintClosed[]; settings: AppSettings }) {
-  const [selected, setSelected] = useState<Set<string>>(new Set(defaultPerformanceGroupKeys));
   const [drilldown, setDrilldown] = useState<{ name: string; label: string; metrics: ItemMetric[] } | null>(null);
 
   const names = new Set<string>();
@@ -618,45 +789,19 @@ function ResponsibleCycleTimeCards({ closedBySprint, settings }: { closedBySprin
     );
   }
 
-  function toggle(key: string) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  }
-
   return (
     <div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-        {performanceGroups.map((g) => (
-          <ToggleChip key={g.key} label={g.label} selected={selected.has(g.key)} onSelected={() => toggle(g.key)} />
-        ))}
-      </div>
-      <div style={{ height: 16 }} />
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
         {sortedNames.map((name) => {
           const mine = closedBySprint.map(({ sprint, closed }) => ({
             sprint,
             closed: closed.filter((m) => isAttributedTo(m, name, settings)),
           }));
-          const data = mine.map(({ sprint, closed }) => {
-            const row: Record<string, string | number | null> = { label: `S${sprint.number}` };
-            let total = 0;
-            let anyValue = false;
-            for (const g of performanceGroups) {
-              if (!selected.has(g.key)) continue;
-              const value = average(closed.map(GROUP_VALUE_OF[g.key]));
-              row[g.key] = value;
-              if (value != null) {
-                total += value;
-                anyValue = true;
-              }
-            }
-            row.total = anyValue ? total : null;
-            return row;
-          });
+          const data = mine.map(({ sprint, closed }) => ({
+            label: `S${sprint.number}`,
+            total: average(closed.map((m) => personCycleDays(m, name, settings))),
+            count: closed.length,
+          }));
           const totalClosed = mine.reduce((s, m) => s + m.closed.length, 0);
           const closedByLabel = new Map(mine.map(({ sprint, closed }) => [`S${sprint.number}`, closed]));
 
@@ -670,9 +815,7 @@ function ResponsibleCycleTimeCards({ closedBySprint, settings }: { closedBySprin
               </div>
               <div style={{ height: 12 }} />
               <div style={{ height: 180 }}>
-                {selected.size === 0 ? (
-                  <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94A3B8', fontSize: 12 }}>Marque ao menos um grupo.</div>
-                ) : totalClosed === 0 ? (
+                {totalClosed === 0 ? (
                   <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94A3B8', fontSize: 12 }}>Sem itens concluídos nesse período.</div>
                 ) : (
                   <ResponsiveContainer width="100%" height="100%">
@@ -690,13 +833,25 @@ function ResponsibleCycleTimeCards({ closedBySprint, settings }: { closedBySprin
                       <CartesianGrid strokeDasharray="3 3" vertical={false} />
                       <XAxis dataKey="label" tick={{ fontSize: 10 }} />
                       <YAxis tick={{ fontSize: 10 }} width={30} />
-                      <Tooltip content={<CycleTimeBreakdownTooltip selected={selected} />} />
+                      <Tooltip formatter={(v) => `${Number(v).toFixed(1)}d`} />
                       <Line type="linear" dataKey="total" name="Cycle Time" stroke={BrandColors.developer} strokeWidth={2.5} dot connectNulls />
                     </LineChart>
                   </ResponsiveContainer>
                 )}
               </div>
-              {totalClosed > 0 && selected.size > 0 && (
+              {(() => {
+                const trend = cycleTrend(data.map((d) => ({ label: d.label, value: d.total })));
+                if (trend == null) return null;
+                return (
+                  <div style={{ marginTop: 8, fontSize: 12, color: '#475569', display: 'flex', gap: 6, alignItems: 'baseline' }}>
+                    <span style={{ fontWeight: 700, color: trend.color, whiteSpace: 'nowrap' }}>
+                      {trend.arrow} {trend.title}
+                    </span>
+                    <span>{trend.detail}</span>
+                  </div>
+                );
+              })()}
+              {totalClosed > 0 && (
                 <div style={{ fontSize: 11, color: '#B0B9C6', textAlign: 'center', marginTop: 2 }}>Clique num ponto pra ver os itens por trás do número</div>
               )}
             </div>
@@ -706,9 +861,9 @@ function ResponsibleCycleTimeCards({ closedBySprint, settings }: { closedBySprin
       {drilldown && (
         <CycleTimeDrilldownDialog
           name={drilldown.name}
+          settings={settings}
           label={drilldown.label}
           metrics={drilldown.metrics}
-          selected={selected}
           onClose={() => setDrilldown(null)}
         />
       )}
@@ -743,28 +898,25 @@ function Modal({ title, width, onClose, children }: { title: string; width: numb
  * up (small-N sprints are very sensitive to this) jumps out immediately. */
 function CycleTimeDrilldownDialog({
   name,
+  settings,
   label,
   metrics,
-  selected,
   onClose,
 }: {
   name: string;
+  settings: AppSettings;
   label: string;
   metrics: ItemMetric[];
-  selected: Set<string>;
   onClose: () => void;
 }) {
-  const groups = performanceGroups.filter((g) => selected.has(g.key));
-  const rows = [...metrics]
-    .map((m) => ({ m, total: groups.reduce((s, g) => s + GROUP_VALUE_OF[g.key](m), 0) }))
-    .sort((a, b) => b.total - a.total);
+  const rows = [...metrics].map((m) => ({ m, total: personCycleDays(m, name, settings) })).sort((a, b) => b.total - a.total);
   const totalDays = rows.reduce((s, r) => s + r.total, 0);
   const avgDays = rows.length === 0 ? 0 : totalDays / rows.length;
 
   return (
     <Modal title={`${name} — ${label}`} width={760} onClose={onClose}>
       <div style={{ fontSize: 12.5, color: '#64748B', marginBottom: 10 }}>
-        {rows.length} {rows.length === 1 ? 'item concluído' : 'itens concluídos'} — média de {avgDays.toFixed(1)}d somando {groups.map((g) => g.label).join(', ')}.
+        {rows.length} {rows.length === 1 ? 'item concluído' : 'itens concluídos'} — Cycle Time médio de {avgDays.toFixed(1)}d.
       </div>
       <table style={tableStyle()}>
         <thead>
@@ -772,10 +924,7 @@ function CycleTimeDrilldownDialog({
             <Th>ID</Th>
             <Th>Título</Th>
             <Th>Criado em</Th>
-            {groups.map((g) => (
-              <Th key={g.key}>{g.label}</Th>
-            ))}
-            <Th>Total</Th>
+            <Th>Cycle Time</Th>
           </tr>
         </thead>
         <tbody>
@@ -786,9 +935,6 @@ function CycleTimeDrilldownDialog({
                 <span style={{ display: 'inline-block', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.item.title}</span>
               </Td>
               <Td>{formatDate(m.item.createdDate)}</Td>
-              {groups.map((g) => (
-                <Td key={g.key}>{GROUP_VALUE_OF[g.key](m).toFixed(1)}d</Td>
-              ))}
               <Td>
                 <span style={{ fontWeight: 700 }}>{total.toFixed(1)}d</span>
               </Td>

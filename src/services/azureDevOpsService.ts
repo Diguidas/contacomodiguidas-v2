@@ -1,5 +1,5 @@
 import { WorkItem } from '../models/workItem';
-import type { StateChange } from '../models/workItem';
+import type { FieldChange, StateChange } from '../models/workItem';
 import { AppSettings } from './settingsService';
 
 export class AzureDevOpsException extends Error {
@@ -34,6 +34,18 @@ interface Histories {
   state: StateChange[];
   boardColumn: StateChange[];
   deadlines: DeadlineEdit[];
+  assigneeChanges: FieldChange[];
+  requestTypeChanges: FieldChange[];
+}
+
+const REQUEST_TYPE_FIELD = 'Custom.2d4ef589-5823-4d3e-9be3-b5ec97179be8';
+
+// Identity fields (System.AssignedTo) come back as objects with displayName;
+// plain text fields come back as strings; a cleared field is undefined/null.
+function fieldValueText(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'object') return ((value as Record<string, any>).displayName ?? '').toString().trim();
+  return String(value).trim();
 }
 
 // Just enough to show a child work item in a list — no history fetch, so
@@ -266,6 +278,8 @@ export class AzureDevOpsService {
     // it — the earliest one set by the card's own owner is the *original*
     // promised date, before any reschedule (by the owner or anyone else).
     const deadlineEdits: DeadlineEdit[] = [];
+    const assigneeChanges: FieldChange[] = [];
+    const requestTypeChanges: FieldChange[] = [];
     for (const update of updates) {
       const fields = update.fields as Record<string, any> | undefined;
       if (fields == null) continue;
@@ -288,6 +302,19 @@ export class AzureDevOpsService {
         boardColumn.push({ state: normalizeBoardColumn(newColumn), date });
       }
 
+      const revisedByName: string = ((update.revisedBy as Record<string, any> | undefined)?.displayName ?? '').toString();
+      const trackedFields: [string, FieldChange[]][] = [
+        ['System.AssignedTo', assigneeChanges],
+        [REQUEST_TYPE_FIELD, requestTypeChanges],
+      ];
+      for (const [fieldName, target] of trackedFields) {
+        const field = fields[fieldName];
+        if (field == null) continue;
+        const from = fieldValueText(field.oldValue);
+        const to = fieldValueText(field.newValue);
+        if (from !== to) target.push({ from, to, date, changedBy: revisedByName });
+      }
+
       const newDeadline: string | undefined = fields['Custom.Prazo']?.newValue;
       if (newDeadline != null) {
         const revisedBy = update.revisedBy as Record<string, any> | undefined;
@@ -298,7 +325,9 @@ export class AzureDevOpsService {
     state.sort((a, b) => a.date.getTime() - b.date.getTime());
     boardColumn.sort((a, b) => a.date.getTime() - b.date.getTime());
     deadlineEdits.sort((a, b) => a.date.getTime() - b.date.getTime());
-    return { state, boardColumn, deadlines: deadlineEdits };
+    assigneeChanges.sort((a, b) => a.date.getTime() - b.date.getTime());
+    requestTypeChanges.sort((a, b) => a.date.getTime() - b.date.getTime());
+    return { state, boardColumn, deadlines: deadlineEdits, assigneeChanges, requestTypeChanges };
   }
 
   // Extracts child work item IDs from the Hierarchy-Forward relations —
@@ -375,11 +404,13 @@ export class AzureDevOpsService {
       targetDate: parseDate(targetDateRaw),
       originalTargetDate: parseDate(originalDeadlineRaw),
       deadlineChangeCount,
-      requestType: fields['Custom.2d4ef589-5823-4d3e-9be3-b5ec97179be8'] ?? '',
+      requestType: fields[REQUEST_TYPE_FIELD] ?? '',
       department: fields['Custom.Departamento'] ?? '',
       complexity: fields['Custom.Complexidade'] ?? '',
       requesterName: fields['Custom.Solicitante'] ?? '',
       childIds,
+      assigneeChanges: histories.assigneeChanges,
+      requestTypeChanges: histories.requestTypeChanges,
     });
   }
 

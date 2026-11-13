@@ -18,6 +18,15 @@ export interface StateChange {
   date: Date;
 }
 
+// One change of a field's value (responsável, tipo de solicitação), with who
+// made it. `from` is '' when the field had no value before.
+export interface FieldChange {
+  from: string;
+  to: string;
+  date: Date;
+  changedBy: string;
+}
+
 export type ItemGroup = 'mine' | 'taggedForMe';
 
 export interface WorkItemInit {
@@ -43,6 +52,8 @@ export interface WorkItemInit {
   complexity?: string;
   requesterName?: string;
   childIds?: number[];
+  assigneeChanges?: FieldChange[];
+  requestTypeChanges?: FieldChange[];
 }
 
 // States that mean the item will never be delivered — formally removed,
@@ -75,6 +86,8 @@ export class WorkItem {
   readonly complexity: string;
   readonly requesterName: string;
   readonly childIds: number[];
+  readonly assigneeChanges: FieldChange[];
+  readonly requestTypeChanges: FieldChange[];
 
   constructor(init: WorkItemInit) {
     this.id = init.id;
@@ -99,6 +112,8 @@ export class WorkItem {
     this.complexity = init.complexity ?? '';
     this.requesterName = init.requesterName ?? '';
     this.childIds = init.childIds ?? [];
+    this.assigneeChanges = init.assigneeChanges ?? [];
+    this.requestTypeChanges = init.requestTypeChanges ?? [];
   }
 
   // Whether the item finished after its *original* promised deadline —

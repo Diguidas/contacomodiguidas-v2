@@ -115,6 +115,16 @@ export function isAttributedTo(m: ItemMetric, name: string, settings: AppSetting
   return boardColumnMatches(settings.developerColumnSet, m.item.currentBoardColumn);
 }
 
+/** Cycle Time of `m` as seen from `name`'s own view (Dashboard pessoal and
+ * "Cycle Time por responsável"): a card literally assigned to them counts the
+ * official Cycle Time; one credited only through the tag (assigned to someone
+ * else) counts just the time it sat with them, in Desenvolvedor/Em Correção. */
+export function personCycleDays(m: ItemMetric, name: string, settings: AppSettings): number {
+  const assignedToThem = m.item.assignedTo.trim().toLowerCase() === name.trim().toLowerCase();
+  const isMe = name.trim().toLowerCase() === settings.myDisplayName.trim().toLowerCase();
+  return isMe && !assignedToThem ? m.cycleTimeDays : m.inProgressCycleDays;
+}
+
 // Groups `metrics` by assignedTo, then additionally credits
 // settings.myDisplayName with every item isAttributedTo says belongs to him
 // via the tag but is literally assigned elsewhere. Additive: those items

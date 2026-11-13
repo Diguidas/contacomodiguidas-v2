@@ -3,7 +3,7 @@ import { AlertTriangle, ChevronDown, ChevronRight, CircleCheck } from 'lucide-re
 import { boardColumnMatches, WorkItem } from '../models/workItem';
 import { formatDuration, ItemMetric, MetricsCalculator } from '../services/metricsService';
 import { AppSettings } from '../services/settingsService';
-import { Sprint } from '../services/sprintService';
+import { Sprint, SprintService } from '../services/sprintService';
 import { attributedGroupBy, sprintCutoff } from '../services/sprintSnapshotService';
 import { BrandColors } from '../theme';
 
@@ -18,10 +18,12 @@ const LOAD_MIN_OPEN = 4;
 const LOAD_RATIO = 2; // WIP ≥ 2× a mediana do time
 const STUCK_DAYS = 7; // dias sem mudar de coluna
 const SUSPECT_MIN = 2;
+const TYPE_MIN_EACH = 3; // concluídos mínimos de Incidente e de Melhoria pra comparar os dois
+const TYPE_WINDOW_SPRINTS = 4; // a sprint selecionada e as 3 anteriores
 const MAX_CARDS_PER_FLAG = 8;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
-type FlagKind = 'fast' | 'slow' | 'load' | 'stuck' | 'suspect';
+type FlagKind = 'fast' | 'slow' | 'load' | 'stuck' | 'suspect' | 'type';
 
 interface FlagCard {
   m: ItemMetric;
@@ -48,6 +50,7 @@ const FLAG_COLORS: Record<FlagKind, string> = {
   load: BrandColors.warning,
   stuck: BrandColors.warning,
   slow: BrandColors.warning,
+  type: BrandColors.warning,
 };
 
 function median(values: number[]): number {
@@ -99,6 +102,26 @@ function analyze(items: WorkItem[], settings: AppSettings, sprint: Sprint | null
     .metrics.filter(
       (m) => !m.done && hasUsableColumn(m) && !boardColumnMatches(settings.triageColumnSet, m.item.currentBoardColumn),
     );
+
+  // Incidente x Melhoria per person, over the last few sprints (one sprint has
+  // too few cards of each type). Plain assignedTo, no tag-credit, and worked
+  // time (waits discounted) — same reasoning as the other time-based rules.
+  const windowStart =
+    sprint == null ? null : new SprintService().sprintFor(sprint.number - (TYPE_WINDOW_SPRINTS - 1)).start;
+  const typeClosed = calculator.calculate(valid, asOf).metrics.filter((m) => {
+    if (!m.done || m.endDate == null || m.isSuspicious) return false;
+    if (sprint == null || windowStart == null) return true;
+    const rangeEnd = new Date(sprint.end.getTime() + MS_PER_DAY);
+    return m.endDate.getTime() >= windowStart.getTime() && m.endDate.getTime() <= rangeEnd.getTime();
+  });
+  const typeByPerson = new Map<string, ItemMetric[]>();
+  for (const m of typeClosed) {
+    const owner = m.item.assignedTo.trim();
+    if (owner === '') continue;
+    if (!typeByPerson.has(owner)) typeByPerson.set(owner, []);
+    typeByPerson.get(owner)!.push(m);
+  }
+  const isType = (m: ItemMetric, type: string) => m.item.requestType.trim().toLowerCase() === type;
 
   const closedBy = attributedGroupBy(closed, settings);
   const openBy = attributedGroupBy(open, settings);
@@ -198,6 +221,30 @@ function analyze(items: WorkItem[], settings: AppSettings, sprint: Sprint | null
             `Tempo trabalhado mediano de ${formatDuration(own)} (time: ${formatDuration(teamMedianWorked)}), ` +
             `já descontando o tempo esperando fila, usuário e fornecedor. A referência do time ignora os cards suspeitos.`,
           cards: [...done]
+            .sort((a, b) => b.workedDays - a.workedDays)
+            .slice(0, MAX_CARDS_PER_FLAG)
+            .map((m) => ({ m, note: formatDuration(m.workedDays) })),
+        });
+      }
+    }
+
+    // Incidente deveria fechar rápido e Melhoria levar mais — quando é o
+    // contrário pra mesma pessoa, vale olhar se os tipos foram bem escolhidos.
+    const own = typeByPerson.get(name) ?? [];
+    const incidents = own.filter((m) => isType(m, 'incidente'));
+    const improvements = own.filter((m) => isType(m, 'melhoria'));
+    if (incidents.length >= TYPE_MIN_EACH && improvements.length >= TYPE_MIN_EACH) {
+      const medIncident = median(incidents.map((m) => m.workedDays));
+      const medImprovement = median(improvements.map((m) => m.workedDays));
+      if (medIncident > medImprovement) {
+        flags.push({
+          kind: 'type',
+          title: 'Incidente mais lento que melhoria',
+          detail:
+            `Tempo trabalhado mediano de ${formatDuration(medIncident)} nos ${incidents.length} incidentes contra ` +
+            `${formatDuration(medImprovement)} nas ${improvements.length} melhorias (últimas ${TYPE_WINDOW_SPRINTS} sprints). ` +
+            `Pode ser incidente mal classificado (conserto sem urgência) ou melhoria que era só um ajuste — vale conversar, não é veredito.`,
+          cards: [...incidents]
             .sort((a, b) => b.workedDays - a.workedDays)
             .slice(0, MAX_CARDS_PER_FLAG)
             .map((m) => ({ m, note: formatDuration(m.workedDays) })),
@@ -323,6 +370,10 @@ function RulesLegend() {
     { color: FLAG_COLORS.load, text: `Muitos cards abertos — ${LOAD_MIN_OPEN}+ abertos e pelo menos ${LOAD_RATIO}× a mediana do time.` },
     { color: FLAG_COLORS.stuck, text: `Cards parados — sem mudar de coluna há mais de ${STUCK_DAYS} dias (fora Usuário e Fornecedor).` },
     { color: FLAG_COLORS.slow, text: `Demora acima do time — ${SLOW_MIN_CLOSED}+ concluídos e tempo trabalhado mediano > ${SLOW_RATIO}× o do time (a referência do time ignora os cards suspeitos/relâmpago).` },
+    {
+      color: FLAG_COLORS.type,
+      text: `Incidente mais lento que melhoria — ${TYPE_MIN_EACH}+ incidentes e ${TYPE_MIN_EACH}+ melhorias concluídos nas últimas ${TYPE_WINDOW_SPRINTS} sprints, e tempo trabalhado mediano de incidente maior que o de melhoria (sinal de tipo mal escolhido).`,
+    },
   ];
   return (
     <div style={{ ...cardStyle(), padding: '12px 16px' }}>

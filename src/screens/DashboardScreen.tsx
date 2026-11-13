@@ -21,7 +21,7 @@ import {
 } from '../services/metricsService';
 import { AppSettings } from '../services/settingsService';
 import { Sprint, SprintService } from '../services/sprintService';
-import { overdueForSprint, sprintCutoff } from '../services/sprintSnapshotService';
+import { overdueForSprint, personCycleDays, sprintCutoff } from '../services/sprintSnapshotService';
 import { BrandColors } from '../theme';
 import '../team-nav.css';
 import {
@@ -122,6 +122,7 @@ export function DashboardScreen({
   onRefresh,
   onSprintChanged,
   lockedResponsible,
+  showRequesters = false,
 }: {
   settings: AppSettings;
   items: WorkItem[];
@@ -136,6 +137,8 @@ export function DashboardScreen({
   // disappears entirely and every filter is pinned to this name, so a
   // regular user can only ever see their own data, not just default to it.
   lockedResponsible?: string;
+  // The "Solicitantes (30 dias)" section is only shown to some users.
+  showRequesters?: boolean;
 }) {
   const completedSectionRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -203,13 +206,8 @@ export function DashboardScreen({
   // Cycle Time per item: items of mine use the column network; items that
   // only matched through the tag (assigned to someone else) count just the
   // time they sat with me, in Desenvolvedor/Em Correção.
-  const cycleOf = (m: ItemMetric): number => {
-    const isMyDisplay =
-      selectedSpecificPerson != null &&
-      selectedSpecificPerson.trim().toLowerCase() === settings.myDisplayName.trim().toLowerCase();
-    const assignedToMe = m.item.assignedTo.trim().toLowerCase() === settings.myDisplayName.trim().toLowerCase();
-    return isMyDisplay && !assignedToMe ? m.cycleTimeDays : m.inProgressCycleDays;
-  };
+  const cycleOf = (m: ItemMetric): number =>
+    selectedSpecificPerson == null ? m.inProgressCycleDays : personCycleDays(m, selectedSpecificPerson, settings);
 
   const itemsInSelectedGroup = items.filter((item) => {
     // Cancelled items (removed, or abandoned for lack of user response)
@@ -418,6 +416,8 @@ export function DashboardScreen({
     ...(isDev ? [{ id: 'queue', label: `Fila com a tag "${settings.tagFilter}"`, icon: <PauseCircle size={16} strokeWidth={2} /> }] : []),
     { id: 'charts', label: 'Gráficos de tempo', icon: <Zap size={16} strokeWidth={2} /> },
     { id: 'breakdown', label: 'Cruzamento por agrupamento', icon: <Building2 size={16} strokeWidth={2} /> },
+    ...(showRequesters ? [{ id: 'requesters', label: 'Solicitantes (30 dias)', icon: <Building2 size={16} strokeWidth={2} /> }] : []),
+    { id: 'deadlines', label: 'Prazos', icon: <Clock size={16} strokeWidth={2} /> },
     { id: 'aging', label: 'Itens em aberto', icon: <Calendar size={16} strokeWidth={2} /> },
     { id: 'triage', label: 'Em Triagem', icon: <TagIcon size={16} strokeWidth={2} /> },
     ...(hasCompleted ? [{ id: 'completed', label: 'Itens concluídos', icon: <CheckCircle2 size={16} strokeWidth={2} /> }] : []),
@@ -486,6 +486,20 @@ export function DashboardScreen({
           cycleOf={cycleOf}
           selectedBreakdown={selectedBreakdown}
           setSelectedBreakdown={setSelectedBreakdown}
+        />
+        <div style={{ height: 20 }} />
+        {showRequesters && (
+          <>
+            <Anchor id="requesters" />
+            <RequestersSection metrics={groupSummary.metrics} personName={selectedSpecificPerson ?? 'responsável'} />
+            <div style={{ height: 20 }} />
+          </>
+        )}
+        <Anchor id="deadlines" />
+        <DeadlinesSection
+          open={groupSummary.inProgress.filter((m) => !m.item.isCancelled)}
+          categoryColorFor={categoryColorFor}
+          onSelectItem={setDetailItem}
         />
         <div style={{ height: 20 }} />
         <Anchor id="aging" />
@@ -916,7 +930,7 @@ function SummaryCards({
     <StatCard
       key="avg"
       title="Cycle Time médio"
-      subtitle="De Em Andamento até Concluído"
+      subtitle="Sem Triagem, Backlog e cancelados"
       value={avgCycleTime != null ? `${avgCycleTime.toFixed(1)} dias` : '—'}
       icon={<Clock size={18} strokeWidth={1.75} />}
       color={BrandColors.primary}
@@ -1370,6 +1384,97 @@ function ChartCard({ title, footnote, trailing, children }: { title: string; foo
   );
 }
 
+/** Quem pediu os cards deste responsável nos últimos 30 dias — por padrão só
+ * os concluídos (data de conclusão) em que ele é o responsável de fato, sem os
+ * que entraram só pela tag; alternável para os criados. Independe da sprint. */
+function RequestersSection({ metrics, personName }: { metrics: ItemMetric[]; personName: string }) {
+  const [mode, setMode] = useState<'done' | 'created'>('done');
+  const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  const me = personName.trim().toLowerCase();
+  const groups = new Map<string, ItemMetric[]>();
+  for (const m of metrics) {
+    if (mode === 'done') {
+      if (!m.done || m.endDate == null || m.endDate.getTime() < cutoff) continue;
+      if (m.item.assignedTo.trim().toLowerCase() !== me) continue;
+    } else if (m.item.createdDate.getTime() < cutoff) {
+      continue;
+    }
+    const name = m.item.requesterName.trim() || 'Sem solicitante';
+    groups.set(name, [...(groups.get(name) ?? []), m]);
+  }
+  const rows = [...groups.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+  const total = rows.reduce((sum, [, ms]) => sum + ms.length, 0);
+  const modeButton = (value: 'done' | 'created', label: string) => (
+    <button
+      onClick={() => setMode(value)}
+      style={{
+        padding: '4px 10px',
+        borderRadius: 6,
+        border: `1px solid ${BrandColors.border}`,
+        backgroundColor: mode === value ? BrandColors.primary : '#fff',
+        color: mode === value ? '#fff' : '#64748B',
+        fontSize: 12,
+        cursor: 'pointer',
+      }}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <ChartCard
+      title="Solicitantes — últimos 30 dias"
+      footnote={
+        mode === 'done'
+          ? `Cards concluídos nos últimos 30 dias em que ${personName} é o responsável, por quem pediu. Independe da sprint selecionada.`
+          : `Cards de ${personName} criados nos últimos 30 dias, por quem pediu. Independe da sprint selecionada.`
+      }
+      trailing={
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 12, color: '#64748B' }}>{total} cards</span>
+          {modeButton('done', 'Concluídos')}
+          {modeButton('created', 'Criados')}
+        </div>
+      }
+    >
+      {rows.length === 0 ? (
+        <span style={{ color: '#64748B', fontSize: 13 }}>
+          {mode === 'done' ? 'Nenhum card concluído nos últimos 30 dias.' : 'Nenhum card criado nos últimos 30 dias.'}
+        </span>
+      ) : (
+        <table style={tableStyle()}>
+          <thead>
+            <tr>
+              <Th>Solicitante</Th>
+              <Th>Setor</Th>
+              <Th numeric>Cards</Th>
+              <Th numeric>Concluídos</Th>
+              <Th numeric>Em aberto</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(([name, ms]) => {
+              const depts = [...new Set(ms.map((m) => m.item.department.trim()).filter((d) => d !== ''))];
+              const done = ms.filter((m) => m.done).length;
+              return (
+                <tr key={name}>
+                  <Td>
+                    <span style={{ fontWeight: 500 }}>{name}</span>
+                  </Td>
+                  <Td>{depts.length === 0 ? '—' : depts.join(', ')}</Td>
+                  <Td numeric>{ms.length}</Td>
+                  <Td numeric>{done}</Td>
+                  <Td numeric>{ms.length - done}</Td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </ChartCard>
+  );
+}
+
 function ChartsRow({ summary, onSeeDetails }: { summary: MetricsSummary; onSeeDetails: () => void }) {
   const categories: { name: string; value: number; color: string }[] = [
     { name: 'Triagem', value: summary.averageTriageDays ?? 0, color: BrandColors.triage },
@@ -1717,6 +1822,127 @@ function TagChips({ tags }: { tags: string[] }) {
           {tag}
         </span>
       ))}
+    </div>
+  );
+}
+
+const DEADLINE_SOON_DAYS = 5;
+
+function startOfDay(d: Date): number {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
+/** Calendar days from today to the card's current deadline — negative once
+ * it's gone. A deadline is valid through the end of its own day, so a card
+ * due today is 0 (not overdue yet). */
+function daysToDeadline(item: WorkItem): number {
+  return Math.round((startOfDay(item.targetDate!) - startOfDay(new Date())) / MS_PER_DAY);
+}
+
+function deadlineStatus(days: number): { label: string; color: string } {
+  if (days < 0) return { label: `Vencido há ${-days} ${-days === 1 ? 'dia' : 'dias'}`, color: BrandColors.danger };
+  if (days === 0) return { label: 'Vence hoje', color: BrandColors.danger };
+  return { label: `Vence em ${days} ${days === 1 ? 'dia' : 'dias'}`, color: BrandColors.warning };
+}
+
+/** Open cards with a deadline gone or about to go, and the ones whose
+ * deadline keeps being moved (by the card's owner, after first setting it). */
+function DeadlinesSection({
+  open,
+  categoryColorFor,
+  onSelectItem,
+}: {
+  open: ItemMetric[];
+  categoryColorFor: (col: string) => string;
+  onSelectItem: (m: ItemMetric) => void;
+}) {
+  const withDeadline = open.filter((m) => m.item.targetDate != null);
+  const atRisk = withDeadline
+    .filter((m) => daysToDeadline(m.item) <= DEADLINE_SOON_DAYS)
+    .sort((a, b) => daysToDeadline(a.item) - daysToDeadline(b.item));
+  const moving = open
+    .filter((m) => m.item.deadlineChangeCount > 0)
+    .sort((a, b) => b.item.deadlineChangeCount - a.item.deadlineChangeCount);
+
+  const row = (m: ItemMetric, showChanges: boolean) => {
+    const item = m.item;
+    const days = item.targetDate == null ? null : daysToDeadline(item);
+    const status = days == null ? null : deadlineStatus(days);
+    return (
+      <tr key={item.id} onClick={() => onSelectItem(m)} style={{ cursor: 'pointer' }}>
+        <Td>{item.id}</Td>
+        <Td>
+          <span style={{ display: 'inline-block', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.title}</span>
+        </Td>
+        <Td>
+          <ColoredTag label={item.currentBoardColumn.trim() || '—'} color={categoryColorFor(item.currentBoardColumn)} />
+        </Td>
+        <Td>{item.targetDate == null ? '—' : formatDate(item.targetDate)}</Td>
+        <Td>{status == null ? '—' : <span style={{ fontWeight: 600, color: status.color }}>{status.label}</span>}</Td>
+        {showChanges && (
+          <>
+            <Td numeric>{item.deadlineChangeCount}x</Td>
+            <Td>{item.originalTargetDate == null ? '—' : formatDate(item.originalTargetDate)}</Td>
+          </>
+        )}
+      </tr>
+    );
+  };
+  const head = (showChanges: boolean) => (
+    <thead>
+      <tr>
+        <Th>ID</Th>
+        <Th>Título</Th>
+        <Th>Coluna</Th>
+        <Th>Prazo atual</Th>
+        <Th>Situação</Th>
+        {showChanges && (
+          <>
+            <Th numeric>Alterações</Th>
+            <Th>Prazo original</Th>
+          </>
+        )}
+      </tr>
+    </thead>
+  );
+
+  return (
+    <div style={cardStyle()}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 16, fontWeight: 'bold', color: BrandColors.danger }}>Prazos</span>
+        <span style={{ fontSize: 12, color: '#64748B' }}>
+          {atRisk.length} vencidos ou a vencer · {moving.length} com prazo alterado
+        </span>
+      </div>
+      <div style={{ height: 4 }} />
+      <div style={{ fontSize: 12, color: '#64748B' }}>
+        Cards em aberto. "Vencidos ou a vencer" usa o prazo atual (com vencimento nos próximos {DEADLINE_SOON_DAYS} dias ou já passado). "Prazo
+        alterado" são os cards cujo responsável remarcou o prazo depois de defini-lo — quanto mais alterações, menos confiável a data.
+      </div>
+      <div style={{ height: 12 }} />
+      <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Vencidos e a vencer</div>
+      {atRisk.length === 0 ? (
+        <span style={{ fontSize: 13, color: '#64748B' }}>Nenhum card em aberto vencido ou vencendo em {DEADLINE_SOON_DAYS} dias.</span>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={tableStyle()}>
+            {head(false)}
+            <tbody>{atRisk.map((m) => row(m, false))}</tbody>
+          </table>
+        </div>
+      )}
+      <div style={{ height: 16 }} />
+      <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Prazo sendo alterado</div>
+      {moving.length === 0 ? (
+        <span style={{ fontSize: 13, color: '#64748B' }}>Nenhum card em aberto com prazo remarcado.</span>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={tableStyle()}>
+            {head(true)}
+            <tbody>{moving.map((m) => row(m, true))}</tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

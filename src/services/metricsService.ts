@@ -124,11 +124,11 @@ export class ItemMetric {
     return this.totalDurationMs / MS_PER_HOUR / 24.0;
   }
 
-  /** "Cycle Time do time": full elapsed time minus Triagem and Backlog —
-   * everything from the moment the card left Backlog to its conclusion.
-   * Same number on Visão do time and on History. */
+  /** "Cycle Time do time": the single official Cycle Time, same number on
+   * Visão do time and on History. Alias of `inProgressCycleDays` (total time
+   * minus Triagem/New/Backlog/Removed/Sem retorno do usuário). */
   get teamCycleDays(): number {
-    return this.totalDays - this.triageDays - this.backlogDays;
+    return this.inProgressCycleDays;
   }
 
   /** Time actually worked on the item: the Cycle Time da rede

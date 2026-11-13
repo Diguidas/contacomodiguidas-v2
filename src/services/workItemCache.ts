@@ -1,5 +1,5 @@
 import { WorkItem } from '../models/workItem';
-import type { StateChange, WorkItemInit } from '../models/workItem';
+import type { FieldChange, StateChange, WorkItemInit } from '../models/workItem';
 
 // Persists the Dashboard's rolling window (items + cachedFromSprintNumber)
 // to sessionStorage — survives the browser reloading the tab (Chrome's
@@ -9,14 +9,24 @@ import type { StateChange, WorkItemInit } from '../models/workItem';
 // tied to this tab, cleared when it's actually closed, exactly matching
 // what "cache for this session" should mean — never localStorage, which
 // would leak stale data across actual browser restarts.
-const STORAGE_PREFIX = 'workItemsCache:v1:';
+const STORAGE_PREFIX = 'workItemsCache:v2:';
 
 interface SerializedStateChange {
   state: string;
   date: string;
 }
 
-interface SerializedWorkItem extends Omit<WorkItemInit, 'createdDate' | 'changedDate' | 'stateHistory' | 'boardColumnHistory' | 'targetDate' | 'originalTargetDate'> {
+interface SerializedFieldChange extends Omit<FieldChange, 'date'> {
+  date: string;
+}
+
+interface SerializedWorkItem
+  extends Omit<
+    WorkItemInit,
+    'createdDate' | 'changedDate' | 'stateHistory' | 'boardColumnHistory' | 'targetDate' | 'originalTargetDate' | 'assigneeChanges' | 'requestTypeChanges'
+  > {
+  assigneeChanges: SerializedFieldChange[];
+  requestTypeChanges: SerializedFieldChange[];
   createdDate: string;
   changedDate: string;
   stateHistory: SerializedStateChange[];
@@ -40,6 +50,13 @@ function serializeChanges(changes: StateChange[]): SerializedStateChange[] {
 }
 function deserializeChanges(changes: SerializedStateChange[]): StateChange[] {
   return changes.map((c) => ({ state: c.state, date: new Date(c.date) }));
+}
+
+function serializeFieldChanges(changes: FieldChange[]): SerializedFieldChange[] {
+  return changes.map((c) => ({ ...c, date: c.date.toISOString() }));
+}
+function deserializeFieldChanges(changes: SerializedFieldChange[]): FieldChange[] {
+  return changes.map((c) => ({ ...c, date: new Date(c.date) }));
 }
 
 function serializeItem(item: WorkItem): SerializedWorkItem {
@@ -66,6 +83,8 @@ function serializeItem(item: WorkItem): SerializedWorkItem {
     complexity: item.complexity,
     requesterName: item.requesterName,
     childIds: item.childIds,
+    assigneeChanges: serializeFieldChanges(item.assigneeChanges),
+    requestTypeChanges: serializeFieldChanges(item.requestTypeChanges),
   };
 }
 
@@ -78,6 +97,8 @@ function deserializeItem(raw: SerializedWorkItem): WorkItem {
     boardColumnHistory: deserializeChanges(raw.boardColumnHistory),
     targetDate: raw.targetDate == null ? null : new Date(raw.targetDate),
     originalTargetDate: raw.originalTargetDate == null ? null : new Date(raw.originalTargetDate),
+    assigneeChanges: deserializeFieldChanges(raw.assigneeChanges),
+    requestTypeChanges: deserializeFieldChanges(raw.requestTypeChanges),
   });
 }
 
